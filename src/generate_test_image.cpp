@@ -2,7 +2,7 @@
 #include "image_io.h"
 #include <cstdlib>
 #include <cstring>
-
+#include <cstdio>
 // Creates a black image with a white rectangle in the middle
 Image create_rectangle_image(int width, int height) {
     Image img;

@@ -14,7 +14,8 @@ Image load_image(const char* path, int width, int height) {
         img.data = nullptr;
         return img;
     }
-    fread(img.data, 1, width * height, f);
+size_t bytes_read = fread(img.data, 1, width * height, f);
+(void)bytes_read; 
     fclose(f);
     return img;
 }
