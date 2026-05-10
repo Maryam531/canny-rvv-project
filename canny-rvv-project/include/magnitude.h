@@ -1,0 +1,14 @@
+#ifndef MAGNITUDE_H
+#define MAGNITUDE_H
+
+#include "image.h"
+#include <cstdint>
+
+Image magnitude_l1(
+    const int16_t* gx,
+    const int16_t* gy,
+    int width,
+    int height
+);
+
+#endif
