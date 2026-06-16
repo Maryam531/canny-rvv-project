@@ -1,5 +1,5 @@
-#pragma once
-
+#ifndef DIRECTION_H
+#define DIRECTION_H
 #include <cstdint>
 
 // Four canonical gradient directions used by Canny NMS.
