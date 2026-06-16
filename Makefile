@@ -65,3 +65,25 @@ test:
 # Clean
 clean:
 	rm -rf $(BUILD)/*
+# Optimization sweep builds
+$(BUILD)/canny_O0:
+	mkdir -p $(BUILD)
+	$(RV_CXX) -march=rv64gcv -mabi=lp64d -O0 -std=c++17 -I./include \
+	$(RV_SRCS) -o $(BUILD)/canny_O0
+
+$(BUILD)/canny_O2:
+	mkdir -p $(BUILD)
+	$(RV_CXX) -march=rv64gcv -mabi=lp64d -O2 -std=c++17 -I./include \
+	$(RV_SRCS) -o $(BUILD)/canny_O2
+
+$(BUILD)/canny_O3:
+	mkdir -p $(BUILD)
+	$(RV_CXX) -march=rv64gcv -mabi=lp64d -O3 -std=c++17 -I./include \
+	$(RV_SRCS) -o $(BUILD)/canny_O3
+
+$(BUILD)/canny_O3_vec:
+	mkdir -p $(BUILD)
+	$(RV_CXX) -march=rv64gcv -mabi=lp64d -O3 -ftree-vectorize -fopt-info-vec \
+	-std=c++17 -I./include $(RV_SRCS) -o $(BUILD)/canny_O3_vec 2>$(BUILD)/vec_report.txt
+
+sweep: $(BUILD)/canny_O0 $(BUILD)/canny_O2 $(BUILD)/canny_O3 $(BUILD)/canny_O3_vec
