@@ -1,0 +1,14 @@
+[33mf56c148[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mFeature_magnitude[m[33m, [m[1;31morigin/Feature_magnitude[m[33m)[m added gradient magnitude
+[33m4176ea7[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m, [m[1;32mmain[m[33m)[m Add complete dual-target Makefile for host and RISC-V builds
+[33m252f463[m Fix gitignore to allow Makefile, add dual-target Makefile
+[33mda9012e[m Merge pull request #1 from Maryam531/feature/sobel
+[33m560a604[m[33m ([m[1;31morigin/feature/sobel[m[33m)[m Implement scalar Sobel gradient computation
+[33m5cc08b8[m Add header includes to source files
+[33ma4882cc[m Add magnitude module
+[33mdc373db[m Define shared interfaces and datatypes
+[33m9641e07[m[33m ([m[1;31morigin/feature/toolchain[m[33m)[m Finalize project structure
+[33m2516b72[m Track empty directories
+[33mbe62dc7[m Add placeholder files
+[33m7e61c0e[m Add project structure
+[33m93ce9bd[m Add initial project structure
+[33ma2d5558[m Initial commit
