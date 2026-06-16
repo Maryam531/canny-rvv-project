@@ -20,10 +20,13 @@ RV_SRCS  = $(SRC_DIR)/main.cpp \
             $(SRC_DIR)/image_io.cpp 
 TEST_SRCS = $(TEST_DIR)/test_gaussian.cpp \
              $(TEST_DIR)/test_sobel.cpp \
+             $(TEST_DIR)/Test_Magnitude.cpp \
+             $(TEST_DIR)/test_direction.cpp \
              $(SRC_DIR)/gaussian.cpp \
              $(SRC_DIR)/sobel.cpp \
-             $(SRC_DIR)/magnitude.cpp
-
+             $(SRC_DIR)/magnitude.cpp \
+             $(SRC_DIR)/direction.cpp \
+             $(SRC_DIR)/image_io.cpp
 # QEMU settings
 VLEN     ?= 256
 QEMU     = qemu-riscv64

@@ -20,4 +20,4 @@ void computeGradientDirections(
     Direction* dirs,
     int width,
     int height);
-
+#endif // DIRECTION_H
