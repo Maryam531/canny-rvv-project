@@ -109,7 +109,7 @@ int main() {
 
             // ── Phase 5: Profiling Breakdown ────────────────
             double total_pipeline_time = total_gaussian_time + total_sobel_time + total_mag_l1_time + total_mag_l2_time;
-            
+
             printf("\n--- Phase 5: Profiling Breakdown ---\n");
             printf("Gaussian:     %.1f%%\n", (total_gaussian_time / total_pipeline_time) * 100.0);
             printf("Sobel:        %.1f%%\n", (total_sobel_time / total_pipeline_time) * 100.0);
@@ -129,6 +129,6 @@ int main() {
     free_image(img);
     free(gx);
     free(gy);
-    
+
     return 0;
 }
