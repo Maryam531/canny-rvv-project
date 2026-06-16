@@ -1,6 +1,6 @@
 # Compilers
 HOST_CXX = g++
-RV_CXX   = riscv64-unknown-elf-g++
+RV_CXX   = riscv64-linux-gnu-g++
 
 # Flags
 HOST_FLAGS = -O2 -std=c++17 -I./include -I$(HOME)/gtest/include
@@ -16,8 +16,8 @@ RV_SRCS  = $(SRC_DIR)/main.cpp \
             $(SRC_DIR)/gaussian.cpp \
             $(SRC_DIR)/sobel.cpp \
             $(SRC_DIR)/magnitude.cpp \
-            $(SRC_DIR)/rvv_gaussian.cpp
-
+            $(SRC_DIR)/rvv_gaussian.cpp \
+            $(SRC_DIR)/image_io.cpp 
 TEST_SRCS = $(TEST_DIR)/test_gaussian.cpp \
              $(TEST_DIR)/test_sobel.cpp \
              $(SRC_DIR)/gaussian.cpp \
