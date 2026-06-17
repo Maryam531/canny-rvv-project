@@ -1,11 +1,9 @@
 # Compilers
 HOST_CXX = g++
-RV_CXX   = riscv64-linux-gnu-g++
-
+RV_CXX = riscv64-linux-gnu-g++
 # Flags
 HOST_FLAGS = -O2 -std=c++17 -I./include -I$(HOME)/gtest/include
-RV_FLAGS   = -march=rv64gcv -mabi=lp64d -O2 -std=c++17 -I./include
-
+RV_FLAGS   = -march=rv64gcv -mabi=lp64d -O3 -ftree-vectorize -std=c++17 -I./include
 # Directories
 SRC_DIR  = src
 TEST_DIR = tests
@@ -16,11 +14,12 @@ RV_SRCS  = $(SRC_DIR)/main.cpp \
             $(SRC_DIR)/gaussian.cpp \
             $(SRC_DIR)/sobel.cpp \
             $(SRC_DIR)/magnitude.cpp \
+            $(SRC_DIR)/rvv_magnitude.cpp \
             $(SRC_DIR)/rvv_gaussian.cpp \
-            $(SRC_DIR)/image_io.cpp 
+            $(SRC_DIR)/image_io.cpp
 TEST_SRCS = $(TEST_DIR)/test_gaussian.cpp \
              $(TEST_DIR)/test_sobel.cpp \
-             $(TEST_DIR)/Test_Magnitude.cpp \
+             $(TEST_DIR)/test_magnitude.cpp \
              $(TEST_DIR)/test_direction.cpp \
              $(SRC_DIR)/gaussian.cpp \
              $(SRC_DIR)/sobel.cpp \
