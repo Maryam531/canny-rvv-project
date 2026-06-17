@@ -7,16 +7,16 @@
 #include <riscv_vector.h>
 
 // ════════════════════════════════════════════════════════════════════════
-//  LMUL EXPERIMENT VERSION: LMUL1
-//  Root load:    vuint8mf2_t
-//  Widen step 1: vuint16m1_t
-//  Accumulator:  vint32m2_t  (and vint64m4_t for the divide)
+//  LMUL EXPERIMENT VERSION: LMUL2
+//  Root load:    vuint8m1_t
+//  Widen step 1: vuint16m2_t
+//  Accumulator:  vint32m4_t  (and vint64m8_t for the divide)
 //
 //  This is the "effective LMUL" reporting convention: since this is a
 //  widening kernel (u8 -> u16 -> u32), we label the version by the LMUL of
 //  the dominant accumulator/compute step, not the literal root load type.
-//  Every vector type in this file is exactly one LMUL step BELOW the
-//  LMUL2 baseline (m1->mf2, m2->m1, m4->m2, m8->m4).
+//  Swap every vector type below by one LMUL step (up/down) to produce the
+//  LMUL1 and LMUL4 siblings — see the companion versions of this file.
 // ════════════════════════════════════════════════════════════════════════
 
 // ── Kernel constants ──────────────────────────────────────────────────────
@@ -112,12 +112,12 @@ void gaussian_blur_rvv_free() {
 //   max acc = 255 * 273 = 69 615 → fits int32 (no widening needed for acc).
 //   For the divide: 69615 * 122911 = 8,557,513,665 < 2^63 → i64 is safe.
 //
-// RVV notes (LMUL1 version):
-//   - Root load:    vuint8mf2  (half a native register's worth of u8 lanes)
-//   - Widen step 1: vuint16m1  (u8mf2 -> u16m1, one widening conversion)
-//   - Widen step 2: vuint32m2  (u16m1 -> u32m2, second widening conversion)
-//   - Accumulator:  vint32m2
-//   - Divide:       widened further to vint64m4 for the reciprocal multiply
+// RVV notes (LMUL2 version):
+//   - Root load:    vuint8m1   (1 native register's worth of u8 lanes)
+//   - Widen step 1: vuint16m2  (u8m1 -> u16m2, one widening conversion)
+//   - Widen step 2: vuint32m4  (u16m2 -> u32m4, second widening conversion)
+//   - Accumulator:  vint32m4
+//   - Divide:       widened further to vint64m8 for the reciprocal multiply
 //   - Each kx offset is a separate vle8 load (stride=1, offset pointer);
 //     no gather needed because kx offsets are small constants.
 
@@ -153,12 +153,12 @@ static void gaussian_blur_rvv_core(const uint8_t* __restrict__ in,
         int vec_end = W - RADIUS;
 
         while (x < vec_end) {
-            // Use e32m2 for the accumulator.
-            // The subsequent i64 step uses e64m4; same element count fits
-            // because vl is set by e32m2 and we reuse it for e64m4.
-            size_t vl = __riscv_vsetvl_e32m2((size_t)(vec_end - x));
+            // Use e32m4 for the accumulator.
+            // The subsequent i64 step uses e64m8; same element count fits
+            // because vl is set by e32m4 and we reuse it for e64m8.
+            size_t vl = __riscv_vsetvl_e32m4((size_t)(vec_end - x));
 
-            vint32m2_t vacc = __riscv_vmv_v_x_i32m2(0, vl);
+            vint32m4_t vacc = __riscv_vmv_v_x_i32m4(0, vl);
 
             // 25 taps: iterate over all (ky, kx) pairs
             for (int ky = 0; ky < KSIZE; ky++) {
@@ -170,34 +170,34 @@ static void gaussian_blur_rvv_core(const uint8_t* __restrict__ in,
                     // Load vl u8 pixels starting at row[x + (kx - RADIUS)].
                     // x >= RADIUS and x+vl-1 <= W-RADIUS-1, so x+(kx-RADIUS)
                     // is always in [0, W-1] for all kx in [0, KSIZE).
-                    vuint8mf2_t vp8 = __riscv_vle8_v_u8mf2(row + x + (kx - RADIUS), vl);
+                    vuint8m1_t vp8 = __riscv_vle8_v_u8m1(row + x + (kx - RADIUS), vl);
 
                     // Zero-extend u8 → u16 → u32, then view as i32 for vmacc.
                     // Pixel values 0-255 never set the sign bit of i16/i32.
-                    vuint16m1_t vp16 = __riscv_vwcvtu_x_x_v_u16m1(vp8, vl);
-                    vuint32m2_t vp32u = __riscv_vwcvtu_x_x_v_u32m2(vp16, vl);
-                    vint32m2_t  vp32  = __riscv_vreinterpret_v_u32m2_i32m2(vp32u);
+                    vuint16m2_t vp16 = __riscv_vwcvtu_x_x_v_u16m2(vp8, vl);
+                    vuint32m4_t vp32u = __riscv_vwcvtu_x_x_v_u32m4(vp16, vl);
+                    vint32m4_t  vp32  = __riscv_vreinterpret_v_u32m4_i32m4(vp32u);
 
-                    vacc = __riscv_vmacc_vx_i32m2(vacc, (int32_t)w, vp32, vl);
+                    vacc = __riscv_vmacc_vx_i32m4(vacc, (int32_t)w, vp32, vl);
                 }
             }
 
             // ── Divide by 273 via widening i64 multiply-shift ─────────────
             // max(vacc) = 69615; 69615 * 122911 = 8,557,513,665 < 2^63 ✓
-            vint64m4_t v64  = __riscv_vsext_vf2_i64m4(vacc, vl);
-            vint64m4_t vmul = __riscv_vmul_vx_i64m4(v64, RECIP_M, vl);
-            vint64m4_t vres = __riscv_vsra_vx_i64m4(vmul, (unsigned)RECIP_S, vl);
+            vint64m8_t v64  = __riscv_vsext_vf2_i64m8(vacc, vl);
+            vint64m8_t vmul = __riscv_vmul_vx_i64m8(v64, RECIP_M, vl);
+            vint64m8_t vres = __riscv_vsra_vx_i64m8(vmul, (unsigned)RECIP_S, vl);
 
             // Clamp [0, 255] and narrow i64 → u8 in three steps
-            vres = __riscv_vmax_vx_i64m4(vres, 0,   vl);
-            vres = __riscv_vmin_vx_i64m4(vres, 255, vl);
+            vres = __riscv_vmax_vx_i64m8(vres, 0,   vl);
+            vres = __riscv_vmin_vx_i64m8(vres, 255, vl);
 
-            vint32m2_t  vn32 = __riscv_vncvt_x_x_w_i32m2(vres, vl);
-            vint16m1_t  vn16 = __riscv_vncvt_x_x_w_i16m1(vn32, vl);
-            vuint8mf2_t vn8  = __riscv_vncvt_x_x_w_u8mf2(
-                                   __riscv_vreinterpret_v_i16m1_u16m1(vn16), vl);
+            vint32m4_t  vn32 = __riscv_vncvt_x_x_w_i32m4(vres, vl);
+            vint16m2_t  vn16 = __riscv_vncvt_x_x_w_i16m2(vn32, vl);
+            vuint8m1_t  vn8  = __riscv_vncvt_x_x_w_u8m1(
+                                   __riscv_vreinterpret_v_i16m2_u16m2(vn16), vl);
 
-            __riscv_vse8_v_u8mf2(out_row + x, vn8, vl);
+            __riscv_vse8_v_u8m1(out_row + x, vn8, vl);
             x += (int)vl;
         }
     }
