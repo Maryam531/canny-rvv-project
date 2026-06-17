@@ -3,7 +3,6 @@
 #include <cmath>
 #include <cassert>
 #include <riscv_vector.h>
-
 static inline size_t round_up64(size_t n) { return (n + 63u) & ~size_t(63); }
 
 // ── Portable i16 abs: max(v, -v) ─────────────────────────────────────────
