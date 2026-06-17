@@ -14,8 +14,9 @@ RV_SRCS  = $(SRC_DIR)/main.cpp \
             $(SRC_DIR)/gaussian.cpp \
             $(SRC_DIR)/sobel.cpp \
             $(SRC_DIR)/magnitude.cpp \
+            $(SRC_DIR)/RVV_Magnitude.cpp \
             $(SRC_DIR)/rvv_gaussian.cpp \
-            $(SRC_DIR)/image_io.cpp 
+            $(SRC_DIR)/image_io.cpp
 TEST_SRCS = $(TEST_DIR)/test_gaussian.cpp \
              $(TEST_DIR)/test_sobel.cpp \
              $(TEST_DIR)/Test_Magnitude.cpp \
