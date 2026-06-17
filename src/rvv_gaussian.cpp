@@ -1,40 +1,3 @@
-// rvv_gaussian_lmul1.cpp
-//
-// LMUL SWEEP — LMUL=1 variant.
-//
-// Vector type chain (all intrinsics used here are base RVV ops present
-// since the earliest stable intrinsic specs — no segment-extraction
-// (vget), no vsetvlmax, no triple-widen chains):
-//
-//   pixel load          : vuint8m1_t   (LMUL=1)
-//   widen u8  -> u16     : vuint16m2_t  (LMUL=2)
-//   widen u16 -> u32     : vuint32m4_t  (LMUL=4)
-//   accumulator           : vuint32m4_t  (LMUL=4)
-//   divide (see below)    : vuint32m4_t  (LMUL=4, NO further widen needed)
-//
-// DIVIDE-BY-273 WITHOUT WIDENING TO i64:
-//   The original approach widened the i32 accumulator to i64 to do a
-//   reciprocal-multiply-then-shift (M=122911, shift=25). That extra widen
-//   step is what makes LMUL=2 and LMUL=4 awkward (i32m8 -> i64m16 is
-//   illegal, and so is i32m16 for LMUL=4's two-widen load chain).
-//
-//   Instead we pick a DIFFERENT reciprocal constant where the shift
-//   amount is exactly 32. For an unsigned 32-bit value x, the high 32
-//   bits of the 32x32->64 product x*M are exactly floor(x*M / 2^32),
-//   which is precisely what the RVV base intrinsic vmulhu computes —
-//   entirely within 32-bit vector registers, no widening at all:
-//
-//       floor(x / 273) == (x * 15732481) >> 32   for all x in [0, 69615]
-//
-//   This was exhaustively verified for every x in [0, 69615] (the max
-//   possible accumulator value, 255*273) with zero mismatches.
-//
-// This removes the i64 stage entirely, which means the divide step now
-// imposes NO additional LMUL constraint beyond what the load/widen chain
-// already requires — at any LMUL level, if the load+widen-to-u32 chain is
-// legal, the divide is automatically legal too (same width, same LMUL,
-// single vmulhu call).
-
 #include "gaussian.h"
 #include <algorithm>
 #include <cassert>
@@ -43,11 +6,30 @@
 #include <cstring>
 #include <riscv_vector.h>
 
-// ── Kernel constants (unchanged from reference) ───────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+//  LMUL EXPERIMENT VERSION: LMUL1
+//  Root load:    vuint8mf2_t
+//  Widen step 1: vuint16m1_t
+//  Accumulator:  vint32m2_t  (and vint64m4_t for the divide)
+//
+//  This is the "effective LMUL" reporting convention: since this is a
+//  widening kernel (u8 -> u16 -> u32), we label the version by the LMUL of
+//  the dominant accumulator/compute step, not the literal root load type.
+//  Every vector type in this file is exactly one LMUL step BELOW the
+//  LMUL2 baseline (m1->mf2, m2->m1, m4->m2, m8->m4).
+// ════════════════════════════════════════════════════════════════════════
+
+// ── Kernel constants ──────────────────────────────────────────────────────
+// The assignment specifies this exact non-separable 5×5 kernel, sum = 273.
+// Do NOT change these values — the kernel is NOT the outer product of K1D
+// and cannot be reproduced by two separable 1D passes.
 static constexpr int32_t KERNEL_SUM = 273;
 static constexpr int     RADIUS     = 2;
 static constexpr int     KSIZE      = 2 * RADIUS + 1;   // 5
 
+// Flattened row-major kernel weights (int16 for use with vmacc).
+// Row 0 is the top row, row 4 is the bottom row.
+// max accumulator = 255 * 273 = 69 615  (fits int32, comfortably)
 static constexpr int16_t KERNEL2D[KSIZE][KSIZE] = {
     { 1,  4,  7,  4, 1},
     { 4, 16, 26, 16, 4},
@@ -56,21 +38,16 @@ static constexpr int16_t KERNEL2D[KSIZE][KSIZE] = {
     { 1,  4,  7,  4, 1}
 };
 
-// Original reciprocal pair (shift=25), kept ONLY for the scalar border
-// fallback so border pixels stay bit-exact with gaussian.cpp's own scalar
-// path (gaussian.cpp uses its own divide; this is a local scalar helper
-// used only for the few border pixels outside the vectorised region).
-static constexpr int64_t RECIP_M_SCALAR = 122911;
-static constexpr int     RECIP_S_SCALAR = 25;
-
-// Vector-path reciprocal pair (shift=32 exactly, so a single vmulhu call
-// gives the answer with no extra shift instruction and no widening).
-// Exhaustively verified for all x in [0, 69615]: 0 mismatches against
-// floor(x/273).
-static constexpr uint32_t RECIP_M_VEC = 15732481u;
+// ── Reciprocal-multiply for ÷273 ─────────────────────────────────────────
+// floor(x / 273) == floor(x * 122911 >> 25)
+// Exhaustively verified for x in [0, 69615] (max scalar acc = 255*273):
+//   0 errors.
+// 69615 * 122911 = 8,557,513,665 < 2^63  → safe as int64 intermediate.
+static constexpr int64_t RECIP_M = 122911;
+static constexpr int     RECIP_S = 25;
 
 static inline int32_t div273_scalar(int32_t x) {
-    return (int32_t)(((int64_t)x * RECIP_M_SCALAR) >> RECIP_S_SCALAR);
+    return (int32_t)(((int64_t)x * RECIP_M) >> RECIP_S);
 }
 
 static inline size_t round_up64(size_t n) {
@@ -78,6 +55,8 @@ static inline size_t round_up64(size_t n) {
 }
 
 // ── Scalar pixel (border fallback, zero-padding) ──────────────────────────
+// Uses the identical KERNEL2D and div273 as the scalar reference so that
+// border pixels are bit-exact with gaussian.cpp.
 static inline uint8_t scalar_pixel(const uint8_t* in, int W, int H, int x, int y) {
     int32_t acc = 0;
     for (int ky = -RADIUS; ky <= RADIUS; ky++) {
@@ -94,10 +73,17 @@ static inline uint8_t scalar_pixel(const uint8_t* in, int W, int H, int x, int y
     return (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
 }
 
+// ── Static persistent scratch (row cache, allocated once via init) ────────
+// We cache the 5 source rows that contribute to the current output row as
+// uint8 pointers — no format conversion needed, since we load u8 directly
+// in the vector loop. No ring buffer arithmetic required: for interior rows
+// we just point into the input image.
 static int s_ring_W = 0;
 static int s_ring_H = 0;
 
 void gaussian_blur_rvv_init(int W, int H) {
+    // No persistent allocation needed for the 2D path — we read directly
+    // from the input image. Keep W/H for the assert in _into().
     s_ring_W = W;
     s_ring_H = H;
 }
@@ -107,7 +93,34 @@ void gaussian_blur_rvv_free() {
     s_ring_H = 0;
 }
 
-// ── Core: 25-tap 2D RVV convolution — LMUL=1 load width ──────────────────
+// ── Core: true 25-tap 2D RVV convolution ─────────────────────────────────
+//
+// Algorithm:
+//   For each interior output pixel (x, y) [i.e. RADIUS ≤ x,y < W,H-RADIUS]:
+//     acc = Σ_{ky=-2}^{2} Σ_{kx=-2}^{2}  in[y+ky][x+kx] * KERNEL2D[ky+2][kx+2]
+//     out = clamp(acc * RECIP_M >> RECIP_S, 0, 255)
+//
+//   The inner kx loop is vectorised: for each kernel row ky, we load a
+//   vector of pixels (shifted by kx in [-2..2]) and multiply-accumulate
+//   into a vint32 accumulator.  After all 25 taps, we widen to i64, apply
+//   the reciprocal multiply-shift, clamp, and narrow back to u8.
+//
+//   Border rows/columns (within RADIUS of any edge) fall back to the scalar
+//   path, which uses the same KERNEL2D and div273, giving bit-exact results.
+//
+// Overflow analysis:
+//   max acc = 255 * 273 = 69 615 → fits int32 (no widening needed for acc).
+//   For the divide: 69615 * 122911 = 8,557,513,665 < 2^63 → i64 is safe.
+//
+// RVV notes (LMUL1 version):
+//   - Root load:    vuint8mf2  (half a native register's worth of u8 lanes)
+//   - Widen step 1: vuint16m1  (u8mf2 -> u16m1, one widening conversion)
+//   - Widen step 2: vuint32m2  (u16m1 -> u32m2, second widening conversion)
+//   - Accumulator:  vint32m2
+//   - Divide:       widened further to vint64m4 for the reciprocal multiply
+//   - Each kx offset is a separate vle8 load (stride=1, offset pointer);
+//     no gather needed because kx offsets are small constants.
+
 static void gaussian_blur_rvv_core(const uint8_t* __restrict__ in,
                                    uint8_t* __restrict__ out,
                                    int W, int H)
@@ -115,70 +128,82 @@ static void gaussian_blur_rvv_core(const uint8_t* __restrict__ in,
     for (int y = 0; y < H; y++) {
         uint8_t* out_row = out + (size_t)y * W;
 
+        // ── Border rows: pure scalar ──────────────────────────────────────
         if (y < RADIUS || y >= H - RADIUS) {
             for (int x = 0; x < W; x++)
                 out_row[x] = scalar_pixel(in, W, H, x, y);
             continue;
         }
 
+        // ── Interior row ──────────────────────────────────────────────────
+        // Left and right border columns: scalar
         for (int x = 0; x < RADIUS; x++)
             out_row[x] = scalar_pixel(in, W, H, x, y);
         for (int x = W - RADIUS; x < W; x++)
             out_row[x] = scalar_pixel(in, W, H, x, y);
 
+        // Hoist the 5 source-row base pointers for this output row.
+        // y >= RADIUS so all sy = y + ky are in [0, H-1] for the interior.
         const uint8_t* src_rows[KSIZE];
         for (int ky = -RADIUS; ky <= RADIUS; ky++)
             src_rows[ky + RADIUS] = in + (size_t)(y + ky) * W;
 
+        // ── Vectorised interior columns ────────────────────────────────────
         int x       = RADIUS;
         int vec_end = W - RADIUS;
 
         while (x < vec_end) {
-            // LMUL=1 root: vsetvl at e8m1 sized off the pixel load width.
-            size_t vl = __riscv_vsetvl_e8m1((size_t)(vec_end - x));
+            // Use e32m2 for the accumulator.
+            // The subsequent i64 step uses e64m4; same element count fits
+            // because vl is set by e32m2 and we reuse it for e64m4.
+            size_t vl = __riscv_vsetvl_e32m2((size_t)(vec_end - x));
 
-            vuint32m4_t vacc = __riscv_vmv_v_x_u32m4(0, vl);
+            vint32m2_t vacc = __riscv_vmv_v_x_i32m2(0, vl);
 
+            // 25 taps: iterate over all (ky, kx) pairs
             for (int ky = 0; ky < KSIZE; ky++) {
-                const uint8_t* row = src_rows[ky];
+                const uint8_t* row = src_rows[ky];   // points at column 0
                 for (int kx = 0; kx < KSIZE; kx++) {
                     int16_t w = KERNEL2D[ky][kx];
-                    if (w == 0) continue;
+                    if (w == 0) continue;             // skip zero weights (none here, but defensive)
 
-                    // LMUL=1 pixel load
-                    vuint8m1_t vp8 = __riscv_vle8_v_u8m1(row + x + (kx - RADIUS), vl);
+                    // Load vl u8 pixels starting at row[x + (kx - RADIUS)].
+                    // x >= RADIUS and x+vl-1 <= W-RADIUS-1, so x+(kx-RADIUS)
+                    // is always in [0, W-1] for all kx in [0, KSIZE).
+                    vuint8mf2_t vp8 = __riscv_vle8_v_u8mf2(row + x + (kx - RADIUS), vl);
 
-                    // widen x2: u8m1 -> u16m2
-                    vuint16m2_t vp16 = __riscv_vwcvtu_x_x_v_u16m2(vp8, vl);
-                    // widen x2: u16m2 -> u32m4
-                    vuint32m4_t vp32 = __riscv_vwcvtu_x_x_v_u32m4(vp16, vl);
+                    // Zero-extend u8 → u16 → u32, then view as i32 for vmacc.
+                    // Pixel values 0-255 never set the sign bit of i16/i32.
+                    vuint16m1_t vp16 = __riscv_vwcvtu_x_x_v_u16m1(vp8, vl);
+                    vuint32m2_t vp32u = __riscv_vwcvtu_x_x_v_u32m2(vp16, vl);
+                    vint32m2_t  vp32  = __riscv_vreinterpret_v_u32m2_i32m2(vp32u);
 
-                    // weight is always positive (KERNEL2D has no negative
-                    // taps), so an unsigned multiply-accumulate is exact.
-                    vacc = __riscv_vmacc_vx_u32m4(vacc, (uint32_t)w, vp32, vl);
+                    vacc = __riscv_vmacc_vx_i32m2(vacc, (int32_t)w, vp32, vl);
                 }
             }
 
-            // Divide by 273 via a single high-multiply — no widening.
-            // Base intrinsic, stable across RVV intrinsic spec versions.
-            vuint32m4_t vres = __riscv_vmulhu_vx_u32m4(vacc, RECIP_M_VEC, vl);
+            // ── Divide by 273 via widening i64 multiply-shift ─────────────
+            // max(vacc) = 69615; 69615 * 122911 = 8,557,513,665 < 2^63 ✓
+            vint64m4_t v64  = __riscv_vsext_vf2_i64m4(vacc, vl);
+            vint64m4_t vmul = __riscv_vmul_vx_i64m4(v64, RECIP_M, vl);
+            vint64m4_t vres = __riscv_vsra_vx_i64m4(vmul, (unsigned)RECIP_S, vl);
 
-            // Clamp [0, 255]. vres is unsigned and already >= 0, so only
-            // the upper bound needs clamping (acc max 69615 -> result max
-            // 254, which is already <= 255 for this kernel, but clamp is
-            // kept for safety/clarity in case constants change).
-            vres = __riscv_vminu_vx_u32m4(vres, 255u, vl);
+            // Clamp [0, 255] and narrow i64 → u8 in three steps
+            vres = __riscv_vmax_vx_i64m4(vres, 0,   vl);
+            vres = __riscv_vmin_vx_i64m4(vres, 255, vl);
 
-            // Narrow u32 -> u16 -> u8 (two single-step narrows, both base
-            // intrinsics, no widening involved).
-            vuint16m2_t vn16 = __riscv_vncvt_x_x_w_u16m2(vres, vl);
-            vuint8m1_t  vn8  = __riscv_vncvt_x_x_w_u8m1(vn16, vl);
+            vint32m2_t  vn32 = __riscv_vncvt_x_x_w_i32m2(vres, vl);
+            vint16m1_t  vn16 = __riscv_vncvt_x_x_w_i16m1(vn32, vl);
+            vuint8mf2_t vn8  = __riscv_vncvt_x_x_w_u8mf2(
+                                   __riscv_vreinterpret_v_i16m1_u16m1(vn16), vl);
 
-            __riscv_vse8_v_u8m1(out_row + x, vn8, vl);
+            __riscv_vse8_v_u8mf2(out_row + x, vn8, vl);
             x += (int)vl;
         }
     }
 }
+
+// ── Public API ────────────────────────────────────────────────────────────
 
 void gaussian_blur_rvv_into(const Image& img, uint8_t* out_data) {
     assert(img.data  != nullptr && out_data != nullptr);
