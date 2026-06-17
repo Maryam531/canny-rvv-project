@@ -7,16 +7,34 @@
 #include <riscv_vector.h>
 
 // ════════════════════════════════════════════════════════════════════════
-//  LMUL EXPERIMENT VERSION: LMUL2
-//  Root load:    vuint8m1_t
-//  Widen step 1: vuint16m2_t
-//  Accumulator:  vint32m4_t  (and vint64m8_t for the divide)
+//  LMUL EXPERIMENT VERSION: LMUL4
+//  Root load:    vuint8m2_t
+//  Widen step 1: vuint16m4_t
+//  Accumulator:  vint32m8_t
 //
 //  This is the "effective LMUL" reporting convention: since this is a
 //  widening kernel (u8 -> u16 -> u32), we label the version by the LMUL of
 //  the dominant accumulator/compute step, not the literal root load type.
-//  Swap every vector type below by one LMUL step (up/down) to produce the
-//  LMUL1 and LMUL4 siblings — see the companion versions of this file.
+//  Every vector type in the 25-tap MAC loop is exactly one LMUL step ABOVE
+//  the LMUL2 baseline (m1->m2, m2->m4, m4->m8).
+//
+//  IMPORTANT ARCHITECTURAL NOTE — why the divide stage looks different here:
+//  The divide-by-273 step needs to widen the i32 accumulator to i64 for
+//  correctness (max product 69615 * 122911 ≈ 8.5e9, overflows i32). RVV's
+//  widening rule is SEW -> 2*SEW requires LMUL -> 2*LMUL. At the LMUL2
+//  baseline that's i32m4 -> i64m8, which is valid (m8 is the max group
+//  size). At THIS tier the accumulator is already i32m8, and there is no
+//  m16 group — RVV does not define LMUL beyond 8. So vint32m8_t cannot be
+//  widened to i64 in a single instruction.
+//
+//  Fix: split the m8 accumulator into its two constituent m4 halves with
+//  __riscv_vget_v_i32m8_i32m4(), widen EACH half to i64m8 independently
+//  (m4 -> m8 is a valid widening step), do the multiply-shift-clamp-narrow
+//  on each half, and store both halves contiguously. The 25-tap
+//  accumulation loop itself still runs at full m8 width — only the final
+//  divide/narrow epilogue is split — so the wide-load/wide-MAC benefit of
+//  this LMUL tier is preserved; only the unavoidable last step pays a
+//  two-way split.
 // ════════════════════════════════════════════════════════════════════════
 
 // ── Kernel constants ──────────────────────────────────────────────────────
@@ -112,12 +130,14 @@ void gaussian_blur_rvv_free() {
 //   max acc = 255 * 273 = 69 615 → fits int32 (no widening needed for acc).
 //   For the divide: 69615 * 122911 = 8,557,513,665 < 2^63 → i64 is safe.
 //
-// RVV notes (LMUL2 version):
-//   - Root load:    vuint8m1   (1 native register's worth of u8 lanes)
-//   - Widen step 1: vuint16m2  (u8m1 -> u16m2, one widening conversion)
-//   - Widen step 2: vuint32m4  (u16m2 -> u32m4, second widening conversion)
-//   - Accumulator:  vint32m4
-//   - Divide:       widened further to vint64m8 for the reciprocal multiply
+// RVV notes (LMUL4 version):
+//   - Root load:    vuint8m2   (2 native registers' worth of u8 lanes)
+//   - Widen step 1: vuint16m4  (u8m2 -> u16m4, one widening conversion)
+//   - Widen step 2: vuint32m8  (u16m4 -> u32m8, second widening conversion)
+//   - Accumulator:  vint32m8
+//   - Divide:       i32m8 split into two i32m4 halves via vget, each
+//                    independently widened to vint64m8 (m4 -> m8 is the
+//                    valid widening step; m8 -> m16 does not exist)
 //   - Each kx offset is a separate vle8 load (stride=1, offset pointer);
 //     no gather needed because kx offsets are small constants.
 
@@ -153,12 +173,11 @@ static void gaussian_blur_rvv_core(const uint8_t* __restrict__ in,
         int vec_end = W - RADIUS;
 
         while (x < vec_end) {
-            // Use e32m4 for the accumulator.
-            // The subsequent i64 step uses e64m8; same element count fits
-            // because vl is set by e32m4 and we reuse it for e64m8.
-            size_t vl = __riscv_vsetvl_e32m4((size_t)(vec_end - x));
+            // Use e32m8 for the accumulator — the widest 32-bit group RVV
+            // defines, giving this tier its largest per-iteration vl.
+            size_t vl = __riscv_vsetvl_e32m8((size_t)(vec_end - x));
 
-            vint32m4_t vacc = __riscv_vmv_v_x_i32m4(0, vl);
+            vint32m8_t vacc = __riscv_vmv_v_x_i32m8(0, vl);
 
             // 25 taps: iterate over all (ky, kx) pairs
             for (int ky = 0; ky < KSIZE; ky++) {
@@ -170,34 +189,63 @@ static void gaussian_blur_rvv_core(const uint8_t* __restrict__ in,
                     // Load vl u8 pixels starting at row[x + (kx - RADIUS)].
                     // x >= RADIUS and x+vl-1 <= W-RADIUS-1, so x+(kx-RADIUS)
                     // is always in [0, W-1] for all kx in [0, KSIZE).
-                    vuint8m1_t vp8 = __riscv_vle8_v_u8m1(row + x + (kx - RADIUS), vl);
+                    vuint8m2_t vp8 = __riscv_vle8_v_u8m2(row + x + (kx - RADIUS), vl);
 
                     // Zero-extend u8 → u16 → u32, then view as i32 for vmacc.
                     // Pixel values 0-255 never set the sign bit of i16/i32.
-                    vuint16m2_t vp16 = __riscv_vwcvtu_x_x_v_u16m2(vp8, vl);
-                    vuint32m4_t vp32u = __riscv_vwcvtu_x_x_v_u32m4(vp16, vl);
-                    vint32m4_t  vp32  = __riscv_vreinterpret_v_u32m4_i32m4(vp32u);
+                    vuint16m4_t vp16 = __riscv_vwcvtu_x_x_v_u16m4(vp8, vl);
+                    vuint32m8_t vp32u = __riscv_vwcvtu_x_x_v_u32m8(vp16, vl);
+                    vint32m8_t  vp32  = __riscv_vreinterpret_v_u32m8_i32m8(vp32u);
 
-                    vacc = __riscv_vmacc_vx_i32m4(vacc, (int32_t)w, vp32, vl);
+                    vacc = __riscv_vmacc_vx_i32m8(vacc, (int32_t)w, vp32, vl);
                 }
             }
 
             // ── Divide by 273 via widening i64 multiply-shift ─────────────
             // max(vacc) = 69615; 69615 * 122911 = 8,557,513,665 < 2^63 ✓
-            vint64m8_t v64  = __riscv_vsext_vf2_i64m8(vacc, vl);
-            vint64m8_t vmul = __riscv_vmul_vx_i64m8(v64, RECIP_M, vl);
-            vint64m8_t vres = __riscv_vsra_vx_i64m8(vmul, (unsigned)RECIP_S, vl);
+            //
+            // vacc is i32m8 — there is no m16 group, so we cannot widen the
+            // whole thing to i64 in one step (m8 -> m16 is not valid). We
+            // split into two i32m4 halves (vget index 0 / 1) and widen each
+            // half to i64m8 separately (m4 -> m8 IS valid). The split point
+            // is vl/2 elements in; if vl is odd (only possible on the very
+            // last partial chunk of a row) the second half simply carries
+            // one fewer logical element and we narrow each half with its
+            // own correctly-sized vl.
+            size_t vl_lo = vl / 2;
+            size_t vl_hi = vl - vl_lo;
 
-            // Clamp [0, 255] and narrow i64 → u8 in three steps
-            vres = __riscv_vmax_vx_i64m8(vres, 0,   vl);
-            vres = __riscv_vmin_vx_i64m8(vres, 255, vl);
+            vint32m4_t vacc_lo = __riscv_vget_v_i32m8_i32m4(vacc, 0);
+            vint32m4_t vacc_hi = __riscv_vget_v_i32m8_i32m4(vacc, 1);
 
-            vint32m4_t  vn32 = __riscv_vncvt_x_x_w_i32m4(vres, vl);
-            vint16m2_t  vn16 = __riscv_vncvt_x_x_w_i16m2(vn32, vl);
-            vuint8m1_t  vn8  = __riscv_vncvt_x_x_w_u8m1(
-                                   __riscv_vreinterpret_v_i16m2_u16m2(vn16), vl);
+            // ── Low half ───────────────────────────────────────────────
+            vint64m8_t v64_lo  = __riscv_vsext_vf2_i64m8(vacc_lo, vl_lo);
+            vint64m8_t vmul_lo = __riscv_vmul_vx_i64m8(v64_lo, RECIP_M, vl_lo);
+            vint64m8_t vres_lo = __riscv_vsra_vx_i64m8(vmul_lo, (unsigned)RECIP_S, vl_lo);
+            vres_lo = __riscv_vmax_vx_i64m8(vres_lo, 0,   vl_lo);
+            vres_lo = __riscv_vmin_vx_i64m8(vres_lo, 255, vl_lo);
 
-            __riscv_vse8_v_u8m1(out_row + x, vn8, vl);
+            vint32m4_t vn32_lo = __riscv_vncvt_x_x_w_i32m4(vres_lo, vl_lo);
+            vint16m2_t vn16_lo = __riscv_vncvt_x_x_w_i16m2(vn32_lo, vl_lo);
+            vuint8m1_t vn8_lo  = __riscv_vncvt_x_x_w_u8m1(
+                                     __riscv_vreinterpret_v_i16m2_u16m2(vn16_lo), vl_lo);
+            __riscv_vse8_v_u8m1(out_row + x, vn8_lo, vl_lo);
+
+            // ── High half ──────────────────────────────────────────────
+            if (vl_hi > 0) {
+                vint64m8_t v64_hi  = __riscv_vsext_vf2_i64m8(vacc_hi, vl_hi);
+                vint64m8_t vmul_hi = __riscv_vmul_vx_i64m8(v64_hi, RECIP_M, vl_hi);
+                vint64m8_t vres_hi = __riscv_vsra_vx_i64m8(vmul_hi, (unsigned)RECIP_S, vl_hi);
+                vres_hi = __riscv_vmax_vx_i64m8(vres_hi, 0,   vl_hi);
+                vres_hi = __riscv_vmin_vx_i64m8(vres_hi, 255, vl_hi);
+
+                vint32m4_t vn32_hi = __riscv_vncvt_x_x_w_i32m4(vres_hi, vl_hi);
+                vint16m2_t vn16_hi = __riscv_vncvt_x_x_w_i16m2(vn32_hi, vl_hi);
+                vuint8m1_t vn8_hi  = __riscv_vncvt_x_x_w_u8m1(
+                                         __riscv_vreinterpret_v_i16m2_u16m2(vn16_hi), vl_hi);
+                __riscv_vse8_v_u8m1(out_row + x + vl_lo, vn8_hi, vl_hi);
+            }
+
             x += (int)vl;
         }
     }
