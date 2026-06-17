@@ -9,9 +9,12 @@
 #include "timer.h"
 
 #define ITERATIONS 100
+int main(int argc, char** argv) {
+    const char* path   = (argc > 1) ? argv[1] : "images/rectangle.raw";
+    int width  = (argc > 2) ? atoi(argv[2]) : 256;
+    int height = (argc > 3) ? atoi(argv[3]) : 256;
 
-int main() {
-    Image img = load_image("images/rectangle.raw", 256, 256);
+    Image img = load_image(path, width, height);
 
     if (!img.data) {
         printf("Error: could not load image\n");

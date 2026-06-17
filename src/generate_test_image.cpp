@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <algorithm>
 // Creates a black image with a white rectangle in the middle
 Image create_rectangle_image(int width, int height) {
     Image img;
@@ -61,7 +62,60 @@ Image create_uniform_image(int width, int height, uint8_t value) {
     memset(img.data, value, width * height);
     return img;
 }
+//Test circle image
+Image create_circle_image(int width, int height, int radius = -1) {
+    Image img;
+    img.width  = width;
+    img.height = height;
+    img.data   = (uint8_t*)aligned_alloc(64, width * height);
+    memset(img.data, 0, width * height);
 
+    int cx = width / 2;
+    int cy = height / 2;
+    int r  = (radius > 0) ? radius : (std::min(width, height) / 4);
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int dx = x - cx;
+            int dy = y - cy;
+            if (dx * dx + dy * dy <= r * r) {
+                img.data[y * width + x] = 255;
+            }
+        }
+    }
+    return img;
+}
+//Test triangle
+Image create_triangle_image(int width, int height) {
+    Image img;
+    img.width  = width;
+    img.height = height;
+    img.data   = (uint8_t*)aligned_alloc(64, width * height);
+    memset(img.data, 0, width * height);
+
+    int x0 = width / 2,     y0 = height / 8;
+    int x1 = width / 8,     y1 = height * 7 / 8;
+    int x2 = width * 7 / 8, y2 = height * 7 / 8;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            auto sign = [](int px, int py, int ax, int ay, int bx, int by) {
+                return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+            };
+            int d1 = sign(x, y, x0, y0, x1, y1);
+            int d2 = sign(x, y, x1, y1, x2, y2);
+            int d3 = sign(x, y, x2, y2, x0, y0);
+
+            bool has_neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+            bool has_pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+
+            if (!(has_neg && has_pos)) {
+                img.data[y * width + x] = 255;
+            }
+        }
+    }
+    return img;
+}
 int main() {
     // Generate all test images into images/ folder
     Image rect = create_rectangle_image(256, 256);
@@ -78,7 +132,13 @@ int main() {
 
     Image uniform = create_uniform_image(256, 256, 128);
     save_image("images/uniform.raw", uniform);
-    free_image(uniform);
+ Image circle = create_circle_image(256, 256);
+save_image("images/circle.raw", circle);
+free_image(circle);
+
+Image triangle = create_triangle_image(256, 256);
+save_image("images/triangle.raw", triangle);
+free_image(triangle);   free_image(uniform);
 
     printf("Test images generated in images/ folder\n");
     return 0;
