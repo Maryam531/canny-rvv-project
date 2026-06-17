@@ -7,9 +7,10 @@
 #include <riscv_vector.h>
 
 // ── Kernel constants ──────────────────────────────────────────────────────
-// The assignment specifies this exact non-separable 5×5 kernel, sum = 273.
-// Do NOT change these values — the kernel is NOT the outer product of K1D
-// and cannot be reproduced by two separable 1D passes.
+// This project uses a fixed 5×5 kernel with a total weight of 273.
+// Please keep these values exactly as they are, because the kernel is not
+// separable and cannot be recreated by applying two 1D passes.
+
 static constexpr int32_t KERNEL_SUM = 273;
 static constexpr int     RADIUS     = 2;
 static constexpr int     KSIZE      = 2 * RADIUS + 1;   // 5
@@ -138,11 +139,17 @@ static void gaussian_blur_rvv_core(const uint8_t* __restrict__ in,
         int vec_end = W - RADIUS;
 
         while (x < vec_end) {
-            // Use e32m4 for the accumulator.
-            // The subsequent i64 step uses e64m8; same element count fits
-            // because vl is set by e32m4 and we reuse it for e64m8.
+            // Set the active vector length (VL) for 32-bit elements using LMUL=4.
+            // LMUL=4 is required so the same VL stays valid through the widened
+            // i64m8 divide stage further down (vl is reused, not recomputed).
+            // If VLEN changes (128, 256, or 512 bits), the returned VL changes
+            // automatically, so this same line works without modification.
             size_t vl = __riscv_vsetvl_e32m4((size_t)(vec_end - x));
 
+            // Initialize the accumulator vector to zero before the 25-tap sum.
+            // LMUL=4 matches the accumulator width that vmacc writes into below.
+            // A larger VLEN zeros more accumulator lanes per call, but the
+            // per-pixel result stays identical regardless of VLEN.
             vint32m4_t vacc = __riscv_vmv_v_x_i32m4(0, vl);
 
             // 25 taps: iterate over all (ky, kx) pairs
@@ -152,36 +159,103 @@ static void gaussian_blur_rvv_core(const uint8_t* __restrict__ in,
                     int16_t w = KERNEL2D[ky][kx];
                     if (w == 0) continue;             // skip zero weights (none here, but defensive)
 
-                    // Load vl u8 pixels starting at row[x + (kx - RADIUS)].
-                    // x >= RADIUS and x+vl-1 <= W-RADIUS-1, so x+(kx-RADIUS)
-                    // is always in [0, W-1] for all kx in [0, KSIZE).
+                    // Load VL unsigned 8-bit pixels for this tap, offset by (kx - RADIUS).
+                    // LMUL=1 keeps register pressure low since this is the raw,
+                    // un-widened pixel data coming straight from the input image.
+                    // A larger VLEN simply loads more pixels per iteration
+                    // automatically; the loaded values and final output don't change.
                     vuint8m1_t vp8 = __riscv_vle8_v_u8m1(row + x + (kx - RADIUS), vl);
 
-                    // Zero-extend u8 → u16 → u32, then view as i32 for vmacc.
-                    // Pixel values 0-255 never set the sign bit of i16/i32.
+                    // Widen 8-bit pixels to 16-bit before multiplication to avoid overflow.
+                    // LMUL increases from m1 to m2 because widening doubles the
+                    // register group needed to keep the same VL.
+                    // A larger VLEN widens more elements each iteration but
+                    // produces identical output.
                     vuint16m2_t vp16 = __riscv_vwcvtu_x_x_v_u16m2(vp8, vl);
+                    // Widen again, 16-bit to 32-bit, to match the accumulator's width.
+                    // LMUL increases from m2 to m4, the same doubling rule
+                    // applied a second time to keep VL constant.
+                    // VLEN size only changes how many pixels widen together each
+                    // pass, never the resulting values.
                     vuint32m4_t vp32u = __riscv_vwcvtu_x_x_v_u32m4(vp16, vl);
+                    // Reinterpret the unsigned widened pixels as signed so that
+                    // vmacc_vx, which expects a signed accumulator, will accept them.
+                    // LMUL stays m4 — a reinterpret never changes the register
+                    // grouping, only the type used to read the same bits.
+                    // VLEN has no effect here since no data is moved or computed.
                     vint32m4_t  vp32  = __riscv_vreinterpret_v_u32m4_i32m4(vp32u);
 
+                    // Multiply vector elements by this tap's kernel coefficient and accumulate.
+                    // LMUL=4 is required because the accumulation uses 32-bit
+                    // values, matching the widened pixel data above.
+                    // With a larger VLEN, more pixels are accumulated per
+                    // iteration while producing the same Gaussian result.
                     vacc = __riscv_vmacc_vx_i32m4(vacc, (int32_t)w, vp32, vl);
                 }
             }
 
             // ── Divide by 273 via widening i64 multiply-shift ─────────────
             // max(vacc) = 69615; 69615 * 122911 = 8,557,513,665 < 2^63 ✓
+            // Sign-extend the 32-bit accumulator to 64-bit before the
+            // reciprocal-multiply divide, since the product needs more range.
+            // LMUL doubles from m4 to m8 to keep VL constant as the element
+            // width doubles again (m8 is the largest LMUL the spec allows).
+            // A different VLEN changes how many lanes are extended per call,
+            // never the extended values themselves.
             vint64m8_t v64  = __riscv_vsext_vf2_i64m8(vacc, vl);
+            // Multiply the accumulator by the reciprocal constant (122911)
+            // to perform the ÷273 approximation.
+            // LMUL=8 is required because the product (up to ~8.5 billion)
+            // only fits in the full 64-bit range.
+            // A different VLEN changes how many of these multiplies run per
+            // instruction, not the math or the result.
             vint64m8_t vmul = __riscv_vmul_vx_i64m8(v64, RECIP_M, vl);
+            // Arithmetic right-shift by 25, the ">> 25" half of the
+            // "x * 122911 >> 25 ≈ x / 273" trick.
+            // LMUL stays at m8 to match the 64-bit product being shifted.
+            // VLEN only changes how many lanes are shifted per call; the
+            // shift amount and result stay fixed.
             vint64m8_t vres = __riscv_vsra_vx_i64m8(vmul, (unsigned)RECIP_S, vl);
 
             // Clamp [0, 255] and narrow i64 → u8 in three steps
+            // Clamp the divide result to a minimum of 0.
+            // LMUL stays m8 since clamping happens before any narrowing.
+            // VLEN changes only how many lanes are clamped per call, never
+            // the clamped values themselves.
             vres = __riscv_vmax_vx_i64m8(vres, 0,   vl);
+            // Clamp the divide result to a maximum of 255.
+            // LMUL stays m8, same reasoning as the min-clamp above.
+            // VLEN changes only how many lanes are clamped per call, never
+            // the clamped values themselves.
             vres = __riscv_vmin_vx_i64m8(vres, 255, vl);
 
+            // Narrow the clamped 64-bit result down to 32-bit.
+            // LMUL halves from m8 to m4 because narrowing halves the
+            // register group to keep VL constant as SEW halves.
+            // VLEN changes how many lanes are narrowed per call, not the
+            // output values, since clamping already happened.
             vint32m4_t  vn32 = __riscv_vncvt_x_x_w_i32m4(vres, vl);
+            // Narrow again, 32-bit to 16-bit, continuing the descent back
+            // toward a single output byte.
+            // LMUL halves from m4 to m2, mirroring the widening done
+            // earlier in reverse.
+            // VLEN changes only how many lanes move per call, not the result.
             vint16m2_t  vn16 = __riscv_vncvt_x_x_w_i16m2(vn32, vl);
+            // Narrow from 16-bit down to the final 8-bit pixel value; the
+            // reinterpret just before it relabels the signed 16-bit result
+            // as unsigned so this narrow's unsigned-source requirement is met.
+            // LMUL halves from m2 to m1, landing back at the same width the
+            // pixels were originally loaded at (the vle8 call above).
+            // VLEN changes how many output pixels are produced per call,
+            // not their values.
             vuint8m1_t  vn8  = __riscv_vncvt_x_x_w_u8m1(
                                    __riscv_vreinterpret_v_i16m2_u16m2(vn16), vl);
 
+            // Store VL finished 8-bit pixels back to the output row.
+            // LMUL=1 matches the load at the top of this loop, keeping the
+            // pipeline symmetric (m1 in, m1 out).
+            // A larger VLEN stores more finished pixels per call
+            // automatically; the source code itself never changes.
             __riscv_vse8_v_u8m1(out_row + x, vn8, vl);
             x += (int)vl;
         }
