@@ -2,7 +2,44 @@
 #define GAUSSIAN_H
 
 #include "image.h"
+#include <cstdint>
 
+// ── Scalar reference implementation ──────────────────────────────────────
+// One-shot call: allocates its own output buffer (and internal scratch),
+// returns a new Image. Use for correctness tests / convenience. Not ideal
+// for benchmarking because every call performs internal aligned_alloc/free.
 Image gaussian_blur(const Image& img);
 
-#endif
+// ── Step-4 benchmark API (scalar, allocation-free) ────────────────────────
+// Mirrors the RVV init/into/free pattern below so the scalar and vector
+// paths can be benchmarked on equal footing (no malloc/free inside the
+// timed region for either one).
+
+// Call ONCE before the benchmark loop to pre-allocate internal scratch.
+void gaussian_blur_init(int W, int H);
+
+// Call inside the timed loop: no heap allocation, writes into out_data
+// (W×H bytes, must already be allocated by the caller).
+void gaussian_blur_into(const Image& img, uint8_t* out_data);
+
+// Call ONCE after the benchmark loop to release internal scratch.
+void gaussian_blur_free();
+
+// ── RVV-optimised implementation ───────────────────────────────────────────
+// One-shot call: allocates its own ring buffer, returns a new Image.
+// Use this for correctness tests. Not ideal for benchmarking because every
+// call performs an internal aligned_alloc/free.
+Image gaussian_blur_rvv(const Image& img);
+
+// ── Step-4 benchmark API (eliminates allocation from the timed region) ────
+// Call ONCE before your benchmark loop to pre-allocate internal ring buffer.
+void gaussian_blur_rvv_init(int W, int H);
+
+// Call inside the timed loop: no heap allocation, writes into out_data
+// (W×H bytes, must already be allocated by the caller).
+void gaussian_blur_rvv_into(const Image& img, uint8_t* out_data);
+
+// Call ONCE after the benchmark loop to release the ring buffer.
+void gaussian_blur_rvv_free();
+
+#endif // GAUSSIAN_H

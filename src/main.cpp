@@ -1,5 +1,30 @@
+// main.cpp – Full Pipeline Benchmark: Scalar vs RVV per stage
+//
+// Pipeline:
+//   Input Image
+//        │
+//        ├─► Scalar Gaussian ──┐
+//        └─► RVV Gaussian    ──┤ (correctness compared)
+//                              │
+//                              ▼
+//                        Scalar Sobel
+//                              │
+//                              ├─► Scalar Magnitude L1 ──┐
+//                              ├─► RVV    Magnitude L1 ──┤ (correctness compared)
+//                              ├─► Scalar Magnitude L2 ──┐
+//                              └─► RVV    Magnitude L2 ──┘ (correctness compared)
+//
+// Each stage is benchmarked individually (ITERATIONS runs, avg ms/run).
+// Correctness is checked by comparing scalar vs RVV output pixel-by-pixel.
+//
+// NOTE on QEMU results:
+//   QEMU emulates each vector instruction sequentially — it does not model
+//   parallel execution. RVV will appear slower than scalar on QEMU. A true
+//   speedup requires real RISC-V V-extension hardware (SiFive X280, etc.).
+
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cmath>
 #include "image.h"
 #include "image_io.h"
@@ -9,7 +34,28 @@
 #include "timer.h"
 
 #define ITERATIONS 100
-int main(int argc, char** argv) {
+
+// ── Helper: compare two u8 buffers, return mismatch count ────────────────
+static int count_mismatches(const uint8_t* a, const uint8_t* b, int n) {
+    int m = 0;
+    for (int i = 0; i < n; i++) m += (a[i] != b[i]);
+    return m;
+}
+
+static void print_correctness(const char* label,
+                               const uint8_t* scalar_out,
+                               const uint8_t* rvv_out,
+                               int n)
+{
+    int mm = count_mismatches(scalar_out, rvv_out, n);
+    if (mm == 0)
+        printf("  Correctness %-20s PASS (outputs identical)\n", label);
+    else
+        printf("  Correctness %-20s FAIL (%d / %d pixels differ)\n",
+               label, mm, n);
+}
+
+ int main(int argc, char** argv) {
     const char* path   = (argc > 1) ? argv[1] : "images/rectangle.raw";
     int width  = (argc > 2) ? atoi(argv[2]) : 256;
     int height = (argc > 3) ? atoi(argv[3]) : 256;
@@ -21,117 +67,223 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("Loaded image: %dx%d\n", img.width, img.height);
 
     int size = img.width * img.height;
+    const int W    = img.width;
+    const int H    = img.height;
+    const int N    = W * H;
 
-    int16_t* gx = (int16_t*)aligned_alloc(64, size * sizeof(int16_t));
-    int16_t* gy = (int16_t*)aligned_alloc(64, size * sizeof(int16_t));
+    printf("Loaded image: %dx%d (%d pixels)\n\n", W, H, N);
 
-    // Variables to accumulate total elapsed times for each stage
-    double total_gaussian_time = 0.0;
-    double total_sobel_time = 0.0;
-    double total_mag_l1_time = 0.0;
-    double total_mag_l2_time = 0.0;
+    // ── Allocate shared output buffers ────────────────────────────────────
+    uint8_t* scalar_gauss = (uint8_t*)aligned_alloc(64, (size_t)N);
+    uint8_t* rvv_gauss    = (uint8_t*)aligned_alloc(64, (size_t)N);
 
-    // ── Stage 1: Gaussian ─────────────────────────────
+    // Sobel results (computed from scalar Gaussian output — single reference)
+    int16_t* gx = (int16_t*)aligned_alloc(64, (size_t)N * sizeof(int16_t));
+    int16_t* gy = (int16_t*)aligned_alloc(64, (size_t)N * sizeof(int16_t));
+
+    // Magnitude output buffers (scalar and RVV, for L1 and L2)
+    uint8_t* scalar_mag_l1 = nullptr;
+    uint8_t* rvv_mag_l1    = nullptr;
+    uint8_t* scalar_mag_l2 = nullptr;
+    uint8_t* rvv_mag_l2    = nullptr;
+
+    // ── Init Gaussian paths outside timing ───────────────────────────────
+    gaussian_blur_init(W, H);
+    gaussian_blur_rvv_init(W, H);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    printf("==========================================================\n");
+    printf("  STAGE 1: GAUSSIAN BLUR\n");
+    printf("==========================================================\n");
+
+    // Warm-up
+    gaussian_blur_into(img, scalar_gauss);
+    gaussian_blur_rvv_into(img, rvv_gauss);
+
+    // Scalar Gaussian
     double t0 = get_time_ms();
-    for (int i = 0; i < ITERATIONS; i++) {
-        Image blurred = gaussian_blur(img);
+    for (int i = 0; i < ITERATIONS; i++)
+        gaussian_blur_into(img, scalar_gauss);
+    double scalar_gauss_ms = (get_time_ms() - t0) / ITERATIONS;
 
-        if (i < ITERATIONS - 1) {
-            free_image(blurred);
-        } else {
-            double t1 = get_time_ms();
-            total_gaussian_time = t1 - t0;
-            printf("Gaussian blur:  %.3f ms (avg)\n", total_gaussian_time / ITERATIONS);
+    // RVV Gaussian
+    t0 = get_time_ms();
+    for (int i = 0; i < ITERATIONS; i++)
+        gaussian_blur_rvv_into(img, rvv_gauss);
+    double rvv_gauss_ms = (get_time_ms() - t0) / ITERATIONS;
 
-            // ── Stage 2: Sobel ─────────────────────────────
-            double t2 = get_time_ms();
-            for (int j = 0; j < ITERATIONS; j++) {
-                sobel(blurred, gx, gy);
-            }
-            double t3 = get_time_ms();
-            total_sobel_time = t3 - t2;
-            printf("Sobel:          %.3f ms (avg)\n", total_sobel_time / ITERATIONS);
+    print_correctness("Gaussian:", scalar_gauss, rvv_gauss, N);
+    printf("  Scalar Gaussian:  %8.3f ms/run\n", scalar_gauss_ms);
+    printf("  RVV    Gaussian:  %8.3f ms/run\n", rvv_gauss_ms);
+    if (rvv_gauss_ms < scalar_gauss_ms)
+        printf("  Speedup:          %8.2fx faster\n",
+               scalar_gauss_ms / rvv_gauss_ms);
+    else
+        printf("  Overhead:         %8.2fx slower (expected on QEMU)\n",
+               rvv_gauss_ms / scalar_gauss_ms);
+    printf("\n");
 
-            // ── Convert Sobel outputs to images ────────────
-            Image sobel_x;
-            Image sobel_y;
+    // ═══════════════════════════════════════════════════════════════════════
+    printf("==========================================================\n");
+    printf("  STAGE 2: SOBEL (scalar only)\n");
+    printf("==========================================================\n");
 
-            sobel_x.width = img.width;
-            sobel_x.height = img.height;
-            sobel_x.data = (uint8_t*)malloc(size);
+    // Use scalar Gaussian output as input to Sobel so the reference is clean.
+    Image scalar_gauss_img;
+    scalar_gauss_img.width  = W;
+    scalar_gauss_img.height = H;
+    scalar_gauss_img.data   = scalar_gauss;   // not owned here
 
-            sobel_y.width = img.width;
-            sobel_y.height = img.height;
-            sobel_y.data = (uint8_t*)malloc(size);
+    // Warm-up
+    sobel(scalar_gauss_img, gx, gy);
 
-            for (int k = 0; k < size; k++) {
-                int vx = abs(gx[k]);
-                int vy = abs(gy[k]);
+    t0 = get_time_ms();
+    for (int i = 0; i < ITERATIONS; i++)
+        sobel(scalar_gauss_img, gx, gy);
+    double sobel_ms = (get_time_ms() - t0) / ITERATIONS;
 
-                if (vx > 255) vx = 255;
-                if (vy > 255) vy = 255;
+    printf("  Scalar Sobel:     %8.3f ms/run\n", sobel_ms);
+    printf("\n");
 
-                sobel_x.data[k] = (uint8_t)vx;
-                sobel_y.data[k] = (uint8_t)vy;
-            }
+    // ═══════════════════════════════════════════════════════════════════════
+    printf("==========================================================\n");
+    printf("  STAGE 3: MAGNITUDE L1  (|Gx| + |Gy|)\n");
+    printf("==========================================================\n");
 
-            // ── Stage 3: Magnitude L1 ─────────────────────
-            double t4 = get_time_ms();
-            for (int j = 0; j < ITERATIONS; j++) {
-                Image m = magnitude_l1(gx, gy, img.width, img.height);
-                free_image(m);
-            }
-            double t5 = get_time_ms();
-            total_mag_l1_time = t5 - t4;
-            printf("Magnitude L1:   %.3f ms (avg)\n", total_mag_l1_time / ITERATIONS);
+    // Warm-up
+    { Image m = magnitude_l1(gx, gy, W, H);     free_image(m); }
+    { Image m = magnitude_l1_rvv(gx, gy, W, H); free_image(m); }
 
-            // ── Stage 4: Magnitude L2 ─────────────────────
-            double t6 = get_time_ms();
-            for (int j = 0; j < ITERATIONS; j++) {
-                Image m = magnitude_l2(gx, gy, img.width, img.height);
-                free_image(m);
-            }
-            double t7 = get_time_ms();
-            total_mag_l2_time = t7 - t6;
-            printf("Magnitude L2:   %.3f ms (avg)\n", total_mag_l2_time / ITERATIONS);
+    // Scalar L1
+    t0 = get_time_ms();
+    for (int i = 0; i < ITERATIONS; i++) { Image m = magnitude_l1(gx, gy, W, H); free_image(m); }
+    double scalar_l1_ms = (get_time_ms() - t0) / ITERATIONS;
 
-            // ── Save outputs ───────────────────────────────
-            Image mag_l1 = magnitude_l1(gx, gy, img.width, img.height);
-            Image mag_l2 = magnitude_l2(gx, gy, img.width, img.height);
+    // RVV L1
+    t0 = get_time_ms();
+    for (int i = 0; i < ITERATIONS; i++) { Image m = magnitude_l1_rvv(gx, gy, W, H); free_image(m); }
+    double rvv_l1_ms = (get_time_ms() - t0) / ITERATIONS;
 
-            save_image("images/blurred.raw", blurred);
-            save_image("images/sobel_x.raw", sobel_x);
-            save_image("images/sobel_y.raw", sobel_y);
-            save_image("images/mag_l1.raw", mag_l1);
-            save_image("images/mag_l2.raw", mag_l2);
+    // Correctness: allocate once outside timing
+    { Image ms = magnitude_l1(gx, gy, W, H);
+      scalar_mag_l1 = ms.data;
+      ms.data = nullptr; }
+    { Image mr = magnitude_l1_rvv(gx, gy, W, H);
+      rvv_mag_l1 = mr.data;
+      mr.data = nullptr; }
 
-            printf("Results saved to images/\n");
+    print_correctness("Magnitude L1:", scalar_mag_l1, rvv_mag_l1, N);
+    printf("  Scalar Mag L1:    %8.3f ms/run\n", scalar_l1_ms);
+    printf("  RVV    Mag L1:    %8.3f ms/run\n", rvv_l1_ms);
+    if (rvv_l1_ms < scalar_l1_ms)
+        printf("  Speedup:          %8.2fx faster\n",
+               scalar_l1_ms / rvv_l1_ms);
+    else
+        printf("  Overhead:         %8.2fx slower (expected on QEMU)\n",
+               rvv_l1_ms / scalar_l1_ms);
+    printf("\n");
 
-            // ── Phase 5: Profiling Breakdown ────────────────
-            double total_pipeline_time = total_gaussian_time + total_sobel_time + total_mag_l1_time + total_mag_l2_time;
+    // ═══════════════════════════════════════════════════════════════════════
+    printf("==========================================================\n");
+    printf("  STAGE 4: MAGNITUDE L2  (sqrt(Gx² + Gy²))\n");
+    printf("==========================================================\n");
 
-            printf("\n--- Phase 5: Profiling Breakdown ---\n");
-            printf("Gaussian:     %.1f%%\n", (total_gaussian_time / total_pipeline_time) * 100.0);
-            printf("Sobel:        %.1f%%\n", (total_sobel_time / total_pipeline_time) * 100.0);
-            printf("Magnitude L1: %.1f%%\n", (total_mag_l1_time / total_pipeline_time) * 100.0);
-            printf("Magnitude L2: %.1f%%\n", (total_mag_l2_time / total_pipeline_time) * 100.0);
-            printf("Total Pipeline Running Cost: %.3f ms (avg per full pipeline run)\n", total_pipeline_time / ITERATIONS);
+    // Warm-up
+    { Image m = magnitude_l2(gx, gy, W, H);     free_image(m); }
+    { Image m = magnitude_l2_rvv(gx, gy, W, H); free_image(m); }
 
-            // Clean up stage-allocated images
-            free_image(blurred);
-            free_image(sobel_x);
-            free_image(sobel_y);
-            free_image(mag_l1);
-            free_image(mag_l2);
-        }
+    // Scalar L2
+    t0 = get_time_ms();
+    for (int i = 0; i < ITERATIONS; i++) { Image m = magnitude_l2(gx, gy, W, H); free_image(m); }
+    double scalar_l2_ms = (get_time_ms() - t0) / ITERATIONS;
+
+    // RVV L2
+    t0 = get_time_ms();
+    for (int i = 0; i < ITERATIONS; i++) { Image m = magnitude_l2_rvv(gx, gy, W, H); free_image(m); }
+    double rvv_l2_ms = (get_time_ms() - t0) / ITERATIONS;
+
+    // Correctness
+    { Image ms = magnitude_l2(gx, gy, W, H);
+      scalar_mag_l2 = ms.data;
+      ms.data = nullptr; }
+    { Image mr = magnitude_l2_rvv(gx, gy, W, H);
+      rvv_mag_l2 = mr.data;
+      mr.data = nullptr; }
+
+    print_correctness("Magnitude L2:", scalar_mag_l2, rvv_mag_l2, N);
+    printf("  Scalar Mag L2:    %8.3f ms/run\n", scalar_l2_ms);
+    printf("  RVV    Mag L2:    %8.3f ms/run\n", rvv_l2_ms);
+    if (rvv_l2_ms < scalar_l2_ms)
+        printf("  Speedup:          %8.2fx faster\n",
+               scalar_l2_ms / rvv_l2_ms);
+    else
+        printf("  Overhead:         %8.2fx slower (expected on QEMU)\n",
+               rvv_l2_ms / scalar_l2_ms);
+    printf("\n");
+
+    // ═══════════════════════════════════════════════════════════════════════
+    printf("==========================================================\n");
+    printf("  FULL PIPELINE SUMMARY (best path per stage)\n");
+    printf("==========================================================\n");
+
+    // "Best" = whichever is faster (on QEMU both will be scalar; on real HW
+    // the RVV path should win).
+    double best_gauss = scalar_gauss_ms < rvv_gauss_ms ? scalar_gauss_ms : rvv_gauss_ms;
+    double best_l1    = scalar_l1_ms    < rvv_l1_ms    ? scalar_l1_ms    : rvv_l1_ms;
+    double best_l2    = scalar_l2_ms    < rvv_l2_ms    ? scalar_l2_ms    : rvv_l2_ms;
+    double total_scalar = scalar_gauss_ms + sobel_ms + scalar_l1_ms + scalar_l2_ms;
+    double total_rvv    = rvv_gauss_ms   + sobel_ms + rvv_l1_ms    + rvv_l2_ms;
+    double total_best   = best_gauss     + sobel_ms + best_l1       + best_l2;
+
+    printf("  %-26s %8.3f ms\n", "Gaussian (scalar):",    scalar_gauss_ms);
+    printf("  %-26s %8.3f ms\n", "Gaussian (RVV):",       rvv_gauss_ms);
+    printf("  %-26s %8.3f ms\n", "Sobel (scalar):",       sobel_ms);
+    printf("  %-26s %8.3f ms\n", "Magnitude L1 (scalar)", scalar_l1_ms);
+    printf("  %-26s %8.3f ms\n", "Magnitude L1 (RVV):",   rvv_l1_ms);
+    printf("  %-26s %8.3f ms\n", "Magnitude L2 (scalar)", scalar_l2_ms);
+    printf("  %-26s %8.3f ms\n", "Magnitude L2 (RVV):",   rvv_l2_ms);
+    printf("----------------------------------------------------------\n");
+    printf("  %-26s %8.3f ms\n", "Total (all scalar):",  total_scalar);
+    printf("  %-26s %8.3f ms\n", "Total (all RVV):",     total_rvv);
+    printf("  %-26s %8.3f ms\n", "Total (best/stage):",  total_best);
+    printf("----------------------------------------------------------\n");
+    printf("  Scalar pipeline breakdown:\n");
+    printf("    Gaussian:  %5.1f%%\n", 100.0 * scalar_gauss_ms / total_scalar);
+    printf("    Sobel:     %5.1f%%\n", 100.0 * sobel_ms         / total_scalar);
+    printf("    Mag L1:    %5.1f%%\n", 100.0 * scalar_l1_ms     / total_scalar);
+    printf("    Mag L2:    %5.1f%%\n", 100.0 * scalar_l2_ms     / total_scalar);
+    printf("\n");
+    printf("NOTE: QEMU emulates vector ops sequentially — RVV speedup\n");
+    printf("      requires real RISC-V V-extension hardware.\n\n");
+
+    // ── Save output images ────────────────────────────────────────────────
+    // Use RVV Gaussian → Sobel → RVV Mag outputs for saved files.
+    {
+        Image rvv_gauss_img;
+        rvv_gauss_img.width  = W;
+        rvv_gauss_img.height = H;
+        rvv_gauss_img.data   = rvv_gauss;   // not owned
+
+        // Re-run Sobel on RVV Gaussian output for saved mag images
+        int16_t* gx2 = (int16_t*)aligned_alloc(64, (size_t)N * sizeof(int16_t));
+        int16_t* gy2 = (int16_t*)aligned_alloc(64, (size_t)N * sizeof(int16_t));
+        sobel(rvv_gauss_img, gx2, gy2);
+
+        Image ml1 = magnitude_l1_rvv(gx2, gy2, W, H);
+        Image ml2 = magnitude_l2_rvv(gx2, gy2, W, H);
+
+        save_image("images/blurred.raw",  rvv_gauss_img);
+        save_image("images/mag_l1.raw",   ml1);
+        save_image("images/mag_l2.raw",   ml2);
+
+        free_image(ml1);
+        free_image(ml2);
+        free(gx2);
+        free(gy2);
     }
 
-    free_image(img);
-    free(gx);
-    free(gy);
 
     return 0;
 }
