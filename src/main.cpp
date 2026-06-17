@@ -55,11 +55,20 @@ static void print_correctness(const char* label,
                label, mm, n);
 }
 
-int main() {
-    // ── Load image ────────────────────────────────────────────────────────
-    Image img = load_image("images/rectangle.raw", 256, 256);
-    if (!img.data) { printf("Error: could not load image\n"); return 1; }
+ int main(int argc, char** argv) {
+    const char* path   = (argc > 1) ? argv[1] : "images/rectangle.raw";
+    int width  = (argc > 2) ? atoi(argv[2]) : 256;
+    int height = (argc > 3) ? atoi(argv[3]) : 256;
 
+    Image img = load_image(path, width, height);
+
+    if (!img.data) {
+        printf("Error: could not load image\n");
+        return 1;
+    }
+
+
+    int size = img.width * img.height;
     const int W    = img.width;
     const int H    = img.height;
     const int N    = W * H;
