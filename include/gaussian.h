@@ -41,5 +41,13 @@ void gaussian_blur_rvv_into(const Image& img, uint8_t* out_data);
 
 // Call ONCE after the benchmark loop to release the ring buffer.
 void gaussian_blur_rvv_free();
-
+// ── LMUL sweep entry points (Phase 6, §6.2) ───────────────────────────────
+// Same algorithm and same output as gaussian_blur_rvv_into() above, just
+// hardcoded to a specific LMUL instead of going through the
+// GAUSSIAN_RVV_LMUL compile-time macro. This lets one binary call all
+// three variants back to back and print a real sweep table, instead of
+// needing three separate builds.
+void gaussian_blur_rvv_into_lmul1(const Image& img, uint8_t* out_data);
+void gaussian_blur_rvv_into_lmul2(const Image& img, uint8_t* out_data);
+void gaussian_blur_rvv_into_lmul4(const Image& img, uint8_t* out_data);
 #endif // GAUSSIAN_H

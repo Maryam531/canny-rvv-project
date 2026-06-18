@@ -411,6 +411,28 @@ void gaussian_blur_rvv_into(const Image& img, uint8_t* out_data) {
     gaussian_blur_rvv_core(img.data, out_data, img.width, img.height);
 }
 
+// LMUL sweep entry points: these call the specific variant directly,
+// bypassing the GAUSSIAN_RVV_LMUL compile-time switch, so main.cpp can
+// run all three back to back in a single binary and print one sweep table
+// instead of needing three separate builds.
+void gaussian_blur_rvv_into_lmul1(const Image& img, uint8_t* out_data) {
+    assert(img.data != nullptr && out_data != nullptr);
+    assert(s_W == img.width && s_H == img.height);
+    gaussian_blur_rvv_core_lmul1(img.data, out_data, img.width, img.height);
+}
+
+void gaussian_blur_rvv_into_lmul2(const Image& img, uint8_t* out_data) {
+    assert(img.data != nullptr && out_data != nullptr);
+    assert(s_W == img.width && s_H == img.height);
+    gaussian_blur_rvv_core_lmul2(img.data, out_data, img.width, img.height);
+}
+
+void gaussian_blur_rvv_into_lmul4(const Image& img, uint8_t* out_data) {
+    assert(img.data != nullptr && out_data != nullptr);
+    assert(s_W == img.width && s_H == img.height);
+    gaussian_blur_rvv_core_lmul4(img.data, out_data, img.width, img.height);
+}
+
 Image gaussian_blur_rvv(const Image& img) {
     assert(img.data != nullptr && img.width > 0 && img.height > 0);
     const int W = img.width, H = img.height;
