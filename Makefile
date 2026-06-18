@@ -14,17 +14,25 @@ RV_SRCS  = $(SRC_DIR)/main.cpp \
             $(SRC_DIR)/gaussian.cpp \
             $(SRC_DIR)/sobel.cpp \
             $(SRC_DIR)/magnitude.cpp \
+            $(SRC_DIR)/direction.cpp \
+            $(SRC_DIR)/nms.cpp \
+            $(SRC_DIR)/threshold.cpp \
             $(SRC_DIR)/rvv_magnitude.cpp \
             $(SRC_DIR)/rvv_gaussian.cpp \
             $(SRC_DIR)/image_io.cpp
+
 TEST_SRCS = $(TEST_DIR)/test_gaussian.cpp \
              $(TEST_DIR)/test_sobel.cpp \
              $(TEST_DIR)/test_magnitude.cpp \
              $(TEST_DIR)/test_direction.cpp \
+             $(TEST_DIR)/test_nms.cpp \
+             $(TEST_DIR)/test_threshold.cpp \
              $(SRC_DIR)/gaussian.cpp \
              $(SRC_DIR)/sobel.cpp \
              $(SRC_DIR)/magnitude.cpp \
              $(SRC_DIR)/direction.cpp \
+             $(SRC_DIR)/nms.cpp \
+             $(SRC_DIR)/threshold.cpp \
              $(SRC_DIR)/image_io.cpp
 # QEMU settings
 VLEN     ?= 256
@@ -32,8 +40,8 @@ QEMU     = qemu-riscv64
 QEMU_CPU = -cpu rv64,v=true,vlen=$(VLEN)
 
 # Targets
-.PHONY: all test canny_rv run run128 run256 run512 clean
-
+.PHONY: all test test_direction test_nms test_threshold \
+        canny_rv run run128 run256 run512 clean sweep
 all: canny_rv
 
 # Build for RISC-V
@@ -63,7 +71,32 @@ test:
 	-L$(HOME)/gtest/lib -lgtest -lgtest_main -lpthread \
 	-o $(BUILD)/test_runner
 	./$(BUILD)/test_runner
+test_direction:
+	mkdir -p $(BUILD)
+	$(HOST_CXX) $(HOST_FLAGS) \
+	$(TEST_DIR)/test_direction.cpp \
+	$(SRC_DIR)/direction.cpp \
+	-L$(HOME)/gtest/lib -lgtest -lgtest_main -lpthread \
+	-o $(BUILD)/test_direction
+	./$(BUILD)/test_direction
 
+test_nms:
+	mkdir -p $(BUILD)
+	$(HOST_CXX) $(HOST_FLAGS) \
+	$(TEST_DIR)/test_nms.cpp \
+	$(SRC_DIR)/nms.cpp \
+	$(SRC_DIR)/direction.cpp \
+	-o $(BUILD)/test_nms
+	./$(BUILD)/test_nms
+
+
+test_threshold:
+	mkdir -p $(BUILD)
+	$(HOST_CXX) $(HOST_FLAGS) \
+	$(TEST_DIR)/test_threshold.cpp \
+	$(SRC_DIR)/threshold.cpp \
+	-o $(BUILD)/test_threshold
+	./$(BUILD)/test_threshold
 # Clean
 clean:
 	rm -rf $(BUILD)/*
