@@ -31,6 +31,7 @@
 #include "gaussian.h"
 #include "sobel.h"
 #include "magnitude.h"
+#include "direction.h"
 #include "timer.h"
 
 #define ITERATIONS 100
@@ -82,7 +83,7 @@ static void print_correctness(const char* label,
     // Sobel results (computed from scalar Gaussian output — single reference)
     int16_t* gx = (int16_t*)aligned_alloc(64, (size_t)N * sizeof(int16_t));
     int16_t* gy = (int16_t*)aligned_alloc(64, (size_t)N * sizeof(int16_t));
-
+ Direction* directions =   (Direction*)aligned_alloc( 64,(size_t)N * sizeof(Direction)); 
     // Magnitude output buffers (scalar and RVV, for L1 and L2)
     uint8_t* scalar_mag_l1 = nullptr;
     uint8_t* rvv_mag_l1    = nullptr;
@@ -146,10 +147,67 @@ static void print_correctness(const char* label,
 
     printf("  Scalar Sobel:     %8.3f ms/run\n", sobel_ms);
     printf("\n");
+printf("==========================================================\n");
+printf("  STAGE 3: DIRECTION QUANTIZATION\n");
+printf("==========================================================\n");
 
+// Warm-up
+computeGradientDirections(gx, gy, directions, W, H);
+
+// Benchmark
+t0 = get_time_ms();
+
+for(int i = 0; i < ITERATIONS; i++)
+{
+    computeGradientDirections(
+        gx,
+        gy,
+        directions,
+        W,
+        H);
+}
+
+double direction_ms =
+    (get_time_ms() - t0) / ITERATIONS;
+int d0   = 0;
+int d45  = 0;
+int d90  = 0;
+int d135 = 0;
+
+for(int i=0;i<N;i++)
+{
+    switch(directions[i])
+    {
+        case Direction::DIR_0:
+            d0++;
+            break;
+
+        case Direction::DIR_45:
+            d45++;
+            break;
+
+        case Direction::DIR_90:
+            d90++;
+            break;
+
+        case Direction::DIR_135:
+            d135++;
+            break;
+    }
+}
+
+printf("Direction Distribution:\n");
+printf("  DIR_0   : %d\n", d0);
+printf("  DIR_45  : %d\n", d45);
+printf("  DIR_90  : %d\n", d90);
+printf("  DIR_135 : %d\n", d135);
+printf("\n");
+printf("  Direction:        %8.3f ms/run\n",
+       direction_ms);
+printf("\n");
     // ═══════════════════════════════════════════════════════════════════════
     printf("==========================================================\n");
-    printf("  STAGE 3: MAGNITUDE L1  (|Gx| + |Gy|)\n");
+    printf("  STAGE 4: MAGNITUDE L1  (|Gx| + |Gy|)\n");
     printf("==========================================================\n");
 
     // Warm-up
@@ -187,7 +245,7 @@ static void print_correctness(const char* label,
 
     // ═══════════════════════════════════════════════════════════════════════
     printf("==========================================================\n");
-    printf("  STAGE 4: MAGNITUDE L2  (sqrt(Gx² + Gy²))\n");
+    printf("  STAGE 5: MAGNITUDE L2  (sqrt(Gx² + Gy²))\n");
     printf("==========================================================\n");
 
     // Warm-up
@@ -233,9 +291,9 @@ static void print_correctness(const char* label,
     double best_gauss = scalar_gauss_ms < rvv_gauss_ms ? scalar_gauss_ms : rvv_gauss_ms;
     double best_l1    = scalar_l1_ms    < rvv_l1_ms    ? scalar_l1_ms    : rvv_l1_ms;
     double best_l2    = scalar_l2_ms    < rvv_l2_ms    ? scalar_l2_ms    : rvv_l2_ms;
-    double total_scalar = scalar_gauss_ms + sobel_ms + scalar_l1_ms + scalar_l2_ms;
-    double total_rvv    = rvv_gauss_ms   + sobel_ms + rvv_l1_ms    + rvv_l2_ms;
-    double total_best   = best_gauss     + sobel_ms + best_l1       + best_l2;
+    double total_scalar = scalar_gauss_ms + sobel_ms +direction_ms + scalar_l1_ms + scalar_l2_ms;
+    double total_rvv    = rvv_gauss_ms   + sobel_ms +direction_ms+ rvv_l1_ms    + rvv_l2_ms;
+    double total_best   = best_gauss     + sobel_ms + best_l1+direction_ms       + best_l2;
 
     printf("  %-26s %8.3f ms\n", "Gaussian (scalar):",    scalar_gauss_ms);
     printf("  %-26s %8.3f ms\n", "Gaussian (RVV):",       rvv_gauss_ms);
@@ -252,6 +310,7 @@ static void print_correctness(const char* label,
     printf("  Scalar pipeline breakdown:\n");
     printf("    Gaussian:  %5.1f%%\n", 100.0 * scalar_gauss_ms / total_scalar);
     printf("    Sobel:     %5.1f%%\n", 100.0 * sobel_ms         / total_scalar);
+    printf("    Direction: %5.1f%%\n",100.0 * direction_ms / total_scalar);
     printf("    Mag L1:    %5.1f%%\n", 100.0 * scalar_l1_ms     / total_scalar);
     printf("    Mag L2:    %5.1f%%\n", 100.0 * scalar_l2_ms     / total_scalar);
     printf("\n");
