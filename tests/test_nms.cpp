@@ -2,6 +2,7 @@
 #include <cstdint>
 
 #include "nms.h"
+#include "direction.h"
 
 
 TEST(NMS, MaximumPreserved)
@@ -18,11 +19,11 @@ TEST(NMS, MaximumPreserved)
     };
 
 
-    uint8_t direction[9] =
+    Direction direction[9] =
     {
-        2,2,2,
-        2,2,2,
-        2,2,2
+        Direction::DIR_90, Direction::DIR_90, Direction::DIR_90,
+        Direction::DIR_90, Direction::DIR_90, Direction::DIR_90,
+        Direction::DIR_90, Direction::DIR_90, Direction::DIR_90
     };
 
 
@@ -57,11 +58,11 @@ TEST(NMS, NonMaximumRemoved)
     };
 
 
-    uint8_t direction[9]=
+    Direction direction[9]=
     {
-        2,2,2,
-        2,2,2,
-        2,2,2
+        Direction::DIR_90, Direction::DIR_90, Direction::DIR_90,
+        Direction::DIR_90, Direction::DIR_90, Direction::DIR_90,
+        Direction::DIR_90, Direction::DIR_90, Direction::DIR_90
     };
 
 
