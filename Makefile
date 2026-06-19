@@ -1,6 +1,6 @@
 # Compilers
 HOST_CXX = g++
-RV_CXX = riscv64-linux-gnu-g++
+RV_CXX = riscv64-unknown-elf-g++
 # Flags
 HOST_FLAGS = -O2 -std=c++17 -I./include -I$(HOME)/gtest/include
 RV_FLAGS   = -march=rv64gcv -mabi=lp64d -O3 -ftree-vectorize -std=c++17 -I./include
