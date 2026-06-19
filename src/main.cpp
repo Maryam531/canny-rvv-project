@@ -21,7 +21,6 @@
 //   QEMU emulates each vector instruction sequentially — it does not model
 //   parallel execution. RVV will appear slower than scalar on QEMU. A true
 //   speedup requires real RISC-V V-extension hardware (SiFive X280, etc.).
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -57,10 +56,18 @@ static void print_correctness(const char* label,
 }
 
  int main(int argc, char** argv) {
-    const char* path   = (argc > 1) ? argv[1] : "images/rectangle.raw";
-    int width  = (argc > 2) ? atoi(argv[2]) : 256;
-    int height = (argc > 3) ? atoi(argv[3]) : 256;
+  
+   // Check if an input image path was provided in the command line arguments
+    if (argc < 2) {
+        printf("Error: Missing input image path!\n");
+        printf("Usage: %s <input_raw_image> [width] [height]\n", argv[0]);
+        printf("Example: %s conan.raw 256 256\n", argv[0]);
+        return 1;
+    }
 
+    const char* path   = argv[1];
+    int width          = (argc > 2) ? atoi(argv[2]) : 256;
+    int height         = (argc > 3) ? atoi(argv[3]) : 256;
     Image img = load_image(path, width, height);
 
     if (!img.data) {
@@ -75,7 +82,8 @@ static void print_correctness(const char* label,
     const int N    = W * H;
 
     printf("Loaded image: %dx%d (%d pixels)\n\n", W, H, N);
-
+    printf("Image size:   %.2f KB\n\n", (N * sizeof(uint8_t)) / 1024.0);
+    
     // ── Allocate shared output buffers ────────────────────────────────────
     uint8_t* scalar_gauss = (uint8_t*)aligned_alloc(64, (size_t)N);
     uint8_t* rvv_gauss    = (uint8_t*)aligned_alloc(64, (size_t)N);
@@ -83,7 +91,7 @@ static void print_correctness(const char* label,
     // Sobel results (computed from scalar Gaussian output — single reference)
     int16_t* gx = (int16_t*)aligned_alloc(64, (size_t)N * sizeof(int16_t));
     int16_t* gy = (int16_t*)aligned_alloc(64, (size_t)N * sizeof(int16_t));
- Direction* directions =   (Direction*)aligned_alloc( 64,(size_t)N * sizeof(Direction)); 
+    Direction* directions =   (Direction*)aligned_alloc( 64,(size_t)N * sizeof(Direction));
     // Magnitude output buffers (scalar and RVV, for L1 and L2)
     uint8_t* scalar_mag_l1 = nullptr;
     uint8_t* rvv_mag_l1    = nullptr;
@@ -370,32 +378,64 @@ printf("\n");
     printf("NOTE: QEMU emulates vector ops sequentially — RVV speedup\n");
     printf("      requires real RISC-V V-extension hardware.\n\n");
 
-    // ── Save output images ────────────────────────────────────────────────
-    // Use RVV Gaussian → Sobel → RVV Mag outputs for saved files.
+// ── Save output images ────────────────────────────────────────────────
     {
         Image rvv_gauss_img;
         rvv_gauss_img.width  = W;
         rvv_gauss_img.height = H;
-        rvv_gauss_img.data   = rvv_gauss;   // not owned
+        rvv_gauss_img.data   = rvv_gauss;
 
-        // Re-run Sobel on RVV Gaussian output for saved mag images
         int16_t* gx2 = (int16_t*)aligned_alloc(64, (size_t)N * sizeof(int16_t));
         int16_t* gy2 = (int16_t*)aligned_alloc(64, (size_t)N * sizeof(int16_t));
         sobel(rvv_gauss_img, gx2, gy2);
 
+        // DEBUG: print a few gx2/gy2 values to confirm Sobel ran on correct image
+        printf("DEBUG gx2[100]=%d gy2[100]=%d\n", (int)gx2[100], (int)gy2[100]);
+        printf("DEBUG gx2[1000]=%d gy2[1000]=%d\n", (int)gx2[1000], (int)gy2[1000]);
+
+        // Save Sobel X
+        {
+            Image sx;
+            sx.width  = W;
+            sx.height = H;
+            sx.data   = (uint8_t*)aligned_alloc(64, (size_t)N);
+            for (int i = 0; i < N; i++) {
+                int32_t v = (int32_t)gx2[i];
+                v = v < -510 ? -510 : v > 510 ? 510 : v;
+                sx.data[i] = (uint8_t)((v + 510) * 255 / 1020);
+            }
+
+            save_image("images/sobel_x.raw", sx);
+            free_image(sx);
+        }
+
+        // Save Sobel Y
+        {
+            Image sy;
+            sy.width  = W;
+            sy.height = H;
+            sy.data   = (uint8_t*)aligned_alloc(64, (size_t)N);
+            for (int i = 0; i < N; i++) {
+                int32_t v = (int32_t)gy2[i];
+                v = v < -510 ? -510 : v > 510 ? 510 : v;
+                sy.data[i] = (uint8_t)((v + 510) * 255 / 1020);
+            }
+             save_image("images/sobel_y.raw", sy);
+            free_image(sy);
+        }
+
         Image ml1 = magnitude_l1_rvv(gx2, gy2, W, H);
         Image ml2 = magnitude_l2_rvv(gx2, gy2, W, H);
 
-        save_image("images/blurred.raw",  rvv_gauss_img);
-        save_image("images/mag_l1.raw",   ml1);
-        save_image("images/mag_l2.raw",   ml2);
+        save_image("images/blurred.raw", rvv_gauss_img);
+        save_image("images/mag_l1.raw",  ml1);
+        save_image("images/mag_l2.raw",  ml2);
 
         free_image(ml1);
         free_image(ml2);
         free(gx2);
         free(gy2);
     }
-
 
     return 0;
 }
