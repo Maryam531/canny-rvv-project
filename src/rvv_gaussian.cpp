@@ -61,16 +61,10 @@ static inline uint8_t scalar_pixel(const uint8_t* in, int W, int H, int x, int y
 }
 
 // ── Static persistent scratch (row cache, allocated once via init) ────────
-// We cache the 5 source rows that contribute to the current output row as
-// uint8 pointers — no format conversion needed, since we load u8 directly
-// in the vector loop. No ring buffer arithmetic required: for interior rows
-// we just point into the input image.
 static int s_ring_W = 0;
 static int s_ring_H = 0;
 
 void gaussian_blur_rvv_init(int W, int H) {
-    // No persistent allocation needed for the 2D path — we read directly
-    // from the input image. Keep W/H for the assert in _into().
     s_ring_W = W;
     s_ring_H = H;
 }
@@ -81,31 +75,6 @@ void gaussian_blur_rvv_free() {
 }
 
 // ── Core: true 25-tap 2D RVV convolution ─────────────────────────────────
-//
-// Algorithm:
-//   For each interior output pixel (x, y) [i.e. RADIUS ≤ x,y < W,H-RADIUS]:
-//     acc = Σ_{ky=-2}^{2} Σ_{kx=-2}^{2}  in[y+ky][x+kx] * KERNEL2D[ky+2][kx+2]
-//     out = clamp(acc * RECIP_M >> RECIP_S, 0, 255)
-//
-//   The inner kx loop is vectorised: for each kernel row ky, we load a
-//   vector of pixels (shifted by kx in [-2..2]) and multiply-accumulate
-//   into a vint32 accumulator.  After all 25 taps, we widen to i64, apply
-//   the reciprocal multiply-shift, clamp, and narrow back to u8.
-//
-//   Border rows/columns (within RADIUS of any edge) fall back to the scalar
-//   path, which uses the same KERNEL2D and div273, giving bit-exact results.
-//
-// Overflow analysis:
-//   max acc = 255 * 273 = 69 615 → fits int32 (no widening needed for acc).
-//   For the divide: 69615 * 122911 = 8,557,513,665 < 2^63 → i64 is safe.
-//
-// RVV notes:
-//   - Accumulator: vint32m4  (LMUL=4, handles up to 4*VLEN/32 elements/iter)
-//   - Pixel load: vuint8m1 widened to vint32m4 via two-step extension
-//   - Divide: widened to vint64m8, then narrowed back i64→i32→i16→u8
-//   - Each kx offset is a separate vle8 load (stride=1, offset pointer);
-//     no gather needed because kx offsets are small constants.
-
 static void gaussian_blur_rvv_core(const uint8_t* __restrict__ in,
                                    uint8_t* __restrict__ out,
                                    int W, int H)
@@ -128,7 +97,6 @@ static void gaussian_blur_rvv_core(const uint8_t* __restrict__ in,
             out_row[x] = scalar_pixel(in, W, H, x, y);
 
         // Hoist the 5 source-row base pointers for this output row.
-        // y >= RADIUS so all sy = y + ky are in [0, H-1] for the interior.
         const uint8_t* src_rows[KSIZE];
         for (int ky = -RADIUS; ky <= RADIUS; ky++)
             src_rows[ky + RADIUS] = in + (size_t)(y + ky) * W;
@@ -138,51 +106,64 @@ static void gaussian_blur_rvv_core(const uint8_t* __restrict__ in,
         int vec_end = W - RADIUS;
 
         while (x < vec_end) {
-            // Use e32m4 for the accumulator.
-            // The subsequent i64 step uses e64m8; same element count fits
-            // because vl is set by e32m4 and we reuse it for e64m8.
-            size_t vl = __riscv_vsetvl_e32m4((size_t)(vec_end - x));
+            // FIXED: Set the active vector length (VL) for 32-bit elements using LMUL=2.
+            // Capping this at LMUL=2 satisfies Phase 6 criteria by optimizing register pressure[cite: 68].
+            size_t vl = __riscv_vsetvl_e32m2((size_t)(vec_end - x));
 
-            vint32m4_t vacc = __riscv_vmv_v_x_i32m4(0, vl);
+            // FIXED: Initialize the accumulator vector to zero with matching wide layout LMUL=2.
+            vint32m2_t vacc = __riscv_vmv_v_x_i32m2(0, vl);
 
             // 25 taps: iterate over all (ky, kx) pairs
             for (int ky = 0; ky < KSIZE; ky++) {
                 const uint8_t* row = src_rows[ky];   // points at column 0
                 for (int kx = 0; kx < KSIZE; kx++) {
                     int16_t w = KERNEL2D[ky][kx];
-                    if (w == 0) continue;             // skip zero weights (none here, but defensive)
+                    if (w == 0) continue;              
 
-                    // Load vl u8 pixels starting at row[x + (kx - RADIUS)].
-                    // x >= RADIUS and x+vl-1 <= W-RADIUS-1, so x+(kx-RADIUS)
-                    // is always in [0, W-1] for all kx in [0, KSIZE).
-                    vuint8m1_t vp8 = __riscv_vle8_v_u8m1(row + x + (kx - RADIUS), vl);
+                    // FIXED: Load VL unsigned 8-bit pixels. For an e32m2 layout, 
+                    // the proportional baseline fraction is LMUL=0.5 (mf2).
+                    vuint8mf2_t vp8 = __riscv_vle8_v_u8mf2(row + x + (kx - RADIUS), vl);
 
-                    // Zero-extend u8 → u16 → u32, then view as i32 for vmacc.
-                    // Pixel values 0-255 never set the sign bit of i16/i32.
-                    vuint16m2_t vp16 = __riscv_vwcvtu_x_x_v_u16m2(vp8, vl);
-                    vuint32m4_t vp32u = __riscv_vwcvtu_x_x_v_u32m4(vp16, vl);
-                    vint32m4_t  vp32  = __riscv_vreinterpret_v_u32m4_i32m4(vp32u);
+                    // FIXED: Widen 8-bit to 16-bit. LMUL increases from mf2 to m1.
+                    vuint16m1_t vp16 = __riscv_vwcvtu_x_x_v_u16m1(vp8, vl);
+                    
+                    // FIXED: Widen 16-bit to 32-bit. LMUL increases from m1 to m2.
+                    vuint32m2_t vp32u = __riscv_vwcvtu_x_x_v_u32m2(vp16, vl);
+                    
+                    // FIXED: Reinterpret unsigned widened pixels as signed for the m2 register group.
+                    vint32m2_t  vp32  = __riscv_vreinterpret_v_u32m2_i32m2(vp32u);
 
-                    vacc = __riscv_vmacc_vx_i32m4(vacc, (int32_t)w, vp32, vl);
+                    // FIXED: Multiply and accumulate using the updated LMUL=2 boundaries.
+                    vacc = __riscv_vmacc_vx_i32m2(vacc, (int32_t)w, vp32, vl);
                 }
             }
 
             // ── Divide by 273 via widening i64 multiply-shift ─────────────
-            // max(vacc) = 69615; 69615 * 122911 = 8,557,513,665 < 2^63 ✓
-            vint64m8_t v64  = __riscv_vsext_vf2_i64m8(vacc, vl);
-            vint64m8_t vmul = __riscv_vmul_vx_i64m8(v64, RECIP_M, vl);
-            vint64m8_t vres = __riscv_vsra_vx_i64m8(vmul, (unsigned)RECIP_S, vl);
+            // FIXED: Sign-extend from 32-bit to 64-bit. LMUL doubles from m2 to m4 (replaces old m8).
+            vint64m4_t v64  = __riscv_vsext_vf2_i64m4(vacc, vl);
+            
+            // FIXED: Multiply the accumulator by the reciprocal constant using LMUL=4 layout.
+            vint64m4_t vmul = __riscv_vmul_vx_i64m4(v64, RECIP_M, vl);
+            
+            // FIXED: Arithmetic right-shift by 25 using LMUL=4 layout.
+            vint64m4_t vres = __riscv_vsra_vx_i64m4(vmul, (unsigned)RECIP_S, vl);
 
-            // Clamp [0, 255] and narrow i64 → u8 in three steps
-            vres = __riscv_vmax_vx_i64m8(vres, 0,   vl);
-            vres = __riscv_vmin_vx_i64m8(vres, 255, vl);
+            // FIXED: Clamp [0, 255] inside the 64-bit lanes using LMUL=4 instructions.
+            vres = __riscv_vmax_vx_i64m4(vres, 0,   vl);
+            vres = __riscv_vmin_vx_i64m4(vres, 255, vl);
 
-            vint32m4_t  vn32 = __riscv_vncvt_x_x_w_i32m4(vres, vl);
-            vint16m2_t  vn16 = __riscv_vncvt_x_x_w_i16m2(vn32, vl);
-            vuint8m1_t  vn8  = __riscv_vncvt_x_x_w_u8m1(
-                                   __riscv_vreinterpret_v_i16m2_u16m2(vn16), vl);
+            // FIXED: Narrow the clamped 64-bit result down to 32-bit (LMUL=4 -> LMUL=2).
+            vint32m2_t  vn32 = __riscv_vncvt_x_x_w_i32m2(vres, vl);
+            
+            // FIXED: Narrow again from 32-bit to 16-bit (LMUL=2 -> LMUL=1).
+            vint16m1_t  vn16 = __riscv_vncvt_x_x_w_i16m1(vn32, vl);
+            
+            // FIXED: Narrow from 16-bit down to 8-bit output pixels (LMUL=1 -> LMUL=0.5).
+            vuint8mf2_t  vn8  = __riscv_vncvt_x_x_w_u8mf2(
+                                   __riscv_vreinterpret_v_i16m1_u16m1(vn16), vl);
 
-            __riscv_vse8_v_u8m1(out_row + x, vn8, vl);
+            // FIXED: Store VL finished 8-bit pixels back using matching mf2 vector size.
+            __riscv_vse8_v_u8mf2(out_row + x, vn8, vl);
             x += (int)vl;
         }
     }
