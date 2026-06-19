@@ -67,3 +67,6 @@ vcpkg_installed/
 Testing/
 .cache/
 build/
+images/*.raw
+build-riscv/
+build/

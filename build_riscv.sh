@@ -1,8 +1,6 @@
 #!/bin/bash
 set -e
-
 mkdir -p build-riscv
-
 riscv64-linux-gnu-g++ \
     -march=rv64gcv \
     -mabi=lp64d \
@@ -21,7 +19,8 @@ riscv64-linux-gnu-g++ \
     -std=c++17 \
     ${OPT_LEVEL:--O3} \
     -ftree-vectorize \
+    -fopt-info-vec-all \
     -lm \
-    -o build-riscv/canny_rv
-
+    -o build-riscv/canny_rv \
+    2> build-riscv/vec_report.txt
 echo "Build done: ${OPT_LEVEL:--O3}"
