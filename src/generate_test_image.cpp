@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <algorithm>
 // Creates a black image with a white rectangle in the middle
 Image create_rectangle_image(int width, int height) {
     Image img;
@@ -68,7 +69,6 @@ Image create_circle_image(int width, int height, int radius = -1) {
     img.height = height;
     img.data   = (uint8_t*)aligned_alloc(64, width * height);
     memset(img.data, 0, width * height);
-
     int cx = width / 2;
     int cy = height / 2;
     int r  = (radius > 0) ? radius : (std::min(width, height) / 4);
@@ -84,7 +84,6 @@ Image create_circle_image(int width, int height, int radius = -1) {
     }
     return img;
 }
-
 //Test triangle
 Image create_triangle_image(int width, int height) {
     Image img;
@@ -116,7 +115,6 @@ Image create_triangle_image(int width, int height) {
     }
     return img;
 }
-
 int main() {
     // Generate all test images into images/ folder
     Image rect = create_rectangle_image(256, 256);
@@ -133,6 +131,15 @@ int main() {
 
     Image uniform = create_uniform_image(256, 256, 128);
     save_image("images/uniform.raw", uniform);
+<<<<<<< HEAD
+ Image circle = create_circle_image(256, 256);
+save_image("images/circle.raw", circle);
+free_image(circle);
+
+Image triangle = create_triangle_image(256, 256);
+save_image("images/triangle.raw", triangle);
+free_image(triangle);   free_image(uniform);
+=======
     free_image(uniform);  
 
     Image circle = create_circle_image(256, 256);
@@ -142,6 +149,7 @@ int main() {
     Image triangle = create_triangle_image(256, 256);
     save_image("images/triangle.raw", triangle);
     free_image(triangle);   free_image(uniform);
+>>>>>>> fc6f637d99c7a58461f805d2ce8b1709d1d152ae
 
     printf("Test images generated in images/ folder\n");
     return 0;
