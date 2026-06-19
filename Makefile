@@ -1,6 +1,6 @@
 # Compilers
 HOST_CXX = g++
-RV_CXX = riscv64-unknown-elf-g++
+RV_CXX = riscv64-linux-gnu-g++
 # Flags
 HOST_FLAGS = -O2 -std=c++17 -I./include -I$(HOME)/gtest/include
 RV_FLAGS   = -march=rv64gcv -mabi=lp64d -O3 -ftree-vectorize -std=c++17 -I./include
@@ -17,6 +17,7 @@ RV_SRCS  = $(SRC_DIR)/main.cpp \
             $(SRC_DIR)/direction.cpp \
             $(SRC_DIR)/nms.cpp \
             $(SRC_DIR)/threshold.cpp \
+            $(SRC_DIR)/hysteresis.cpp \
             $(SRC_DIR)/rvv_magnitude.cpp \
             $(SRC_DIR)/rvv_gaussian.cpp \
             $(SRC_DIR)/image_io.cpp
@@ -27,12 +28,14 @@ TEST_SRCS = $(TEST_DIR)/test_gaussian.cpp \
              $(TEST_DIR)/test_direction.cpp \
              $(TEST_DIR)/test_nms.cpp \
              $(TEST_DIR)/test_threshold.cpp \
+             $(TEST_DIR)/test_hysteresis.cpp \
              $(SRC_DIR)/gaussian.cpp \
              $(SRC_DIR)/sobel.cpp \
              $(SRC_DIR)/magnitude.cpp \
              $(SRC_DIR)/direction.cpp \
              $(SRC_DIR)/nms.cpp \
              $(SRC_DIR)/threshold.cpp \
+             $(SRC_DIR)/hysteresis.cpp \
              $(SRC_DIR)/image_io.cpp
 # QEMU settings
 VLEN     ?= 256
@@ -40,7 +43,7 @@ QEMU     = qemu-riscv64
 QEMU_CPU = -cpu rv64,v=true,vlen=$(VLEN)
 
 # Targets
-.PHONY: all test test_direction test_nms test_threshold \
+.PHONY: all test test_direction test_nms test_threshold test_hysteresis \
         canny_rv run run128 run256 run512 clean sweep
 all: canny_rv
 
@@ -97,6 +100,16 @@ test_threshold:
 	$(SRC_DIR)/threshold.cpp \
 	-o $(BUILD)/test_threshold
 	./$(BUILD)/test_threshold
+
+test_hysteresis:
+	mkdir -p $(BUILD)
+	$(HOST_CXX) $(HOST_FLAGS) \
+	$(TEST_DIR)/test_hysteresis.cpp \
+	$(SRC_DIR)/hysteresis.cpp \
+	$(SRC_DIR)/threshold.cpp \
+	-L$(HOME)/gtest/lib -lgtest -lgtest_main -lpthread \
+	-o $(BUILD)/test_hysteresis
+	./$(BUILD)/test_hysteresis
 # Clean
 clean:
 	rm -rf $(BUILD)/*
