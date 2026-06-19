@@ -32,4 +32,3 @@ static inline double get_time_ms() {
 #endif
 
 #endif // TIMER_H
-

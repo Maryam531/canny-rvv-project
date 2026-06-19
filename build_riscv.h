@@ -3,9 +3,16 @@ set -e
 
 mkdir -p build-riscv
 
+# Build the RISC-V bare-metal binary
 riscv64-unknown-elf-g++ \
-    -static \
+    -march=rv64gcv \
+    -mabi=lp64d \
     -mcmodel=medany \
+    -static \
+    -nostdlib \
+    -nostartfiles \
+    -T linker.ld \
+    crt0.s \
     src/main.cpp \
     src/gaussian.cpp \
     src/sobel.cpp \
@@ -18,13 +25,9 @@ riscv64-unknown-elf-g++ \
     src/image_io.cpp \
     src/syscalls.cpp \
     -Iinclude \
-    -march=rv64gcv \
-    -mabi=lp64d \
     -std=c++17 \
     ${OPT_LEVEL:--O3} \
     -ftree-vectorize \
-    -lm \
     -o build-riscv/canny_rv
 
 echo "Build done: ${OPT_LEVEL:--O3}"
-
