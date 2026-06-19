@@ -3,19 +3,6 @@
 A high-performance implementation of the Canny Edge Detection pipeline in C++, targeting the **RISC-V RV64GCV architecture** and accelerated using the **RISC-V Vector Extension (RVV)**. This project demonstrates a complete embedded systems optimization workflow, starting from a scalar C++ implementation, analyzing compiler optimizations, profiling performance bottlenecks, and finally implementing hand-vectorized kernels using RVV intrinsics.
 
 ---
-
-## Team Members
-
-| Name            | Responsibilities                                                                    |
-| --------------- | ----------------------------------------------------------------------------------- |
-| Menna           | Gradient Magnitude (L1/L2) implementation, RVV Magnitude optimization, unit testing |
-| Maryam531       | Infrastructure setup, toolchain configuration, Gaussian Blur, Sobel Gradient        |
-| Logine-Ahmed    | Testing framework, Gradient Direction module                                        |
-| Mariam Mohammed | Infrastructure support, Gaussian Blur, Sobel Gradient                               |
-| Yousra          | Testing framework, Gradient Direction module                                        |
-
----
-
 # Project Objectives
 
 The primary objectives of this project are:
@@ -214,6 +201,58 @@ The final edge-detected image.
 
 ---
 
+# Additional Components
+
+## Hysteresis Edge Tracking
+
+Hysteresis is the final stage of the complete Canny Edge Detection algorithm. After double thresholding, pixels are classified as strong edges, weak edges, or non-edges.
+
+Weak edge pixels are preserved only if they are connected to a strong edge through neighboring pixels. Isolated weak edges are removed.
+
+### Purpose
+
+- Eliminate false edges caused by noise
+- Preserve continuous object boundaries
+- Improve the quality of the final edge map
+
+### Output
+
+A clean binary edge image containing only meaningful connected edges.
+
+---
+
+## Linker Script (linker.ld)
+
+The linker script defines how the program is arranged in memory during the linking stage. It specifies where code, data, stack, and other sections are placed in memory.
+
+In this project, the linker script is required for bare-metal RISC-V execution and works together with the startup assembly file (`crt0.s`) to initialize the program before `main()` is called.
+
+### Purpose
+
+- Define memory layout
+- Place program sections correctly
+- Support bare-metal execution
+
+---
+
+## Python Utility Scripts
+
+Several Python scripts were created to assist development, debugging, and visualization.
+
+### check_boundary.py
+
+Verifies that boundary pixels are processed correctly, especially for convolution operations such as Gaussian blur and Sobel filtering.
+
+### view_image.py
+
+Loads and displays raw grayscale image files, allowing visual inspection of intermediate and final outputs.
+
+### view_pipeline.py
+
+Visualizes multiple stages of the Canny pipeline side-by-side, making it easier to verify the correctness of each processing step and compare outputs.
+
+---
+
 # Implemented Features
 
 ## Pipeline Stages Implemented
@@ -238,14 +277,30 @@ The final edge-detected image.
 ```text
 canny-rvv-project/
 │
-├── include/        Header files
-├── src/            Scalar and RVV implementations
-├── tests/          GoogleTest unit tests
-├── images/         Input and output images
-├── app/            Application support files
-├── build/          Build output
-├── Makefile
-└── README.md
+├── include/            Header files
+├── src/                Source code
+├── tests/              GoogleTest test suite
+├── images/             Test and output images
+│
+├── Makefile            Build configuration
+├── README.md           Project documentation
+├── .gitignore          Git ignore rules
+│
+├── build_riscv.sh      RISC-V build script
+├── crt0.s              Bare-metal startup assembly
+├── linker.ld           Memory layout and linker configuration for bare-metal builds
+│
+├── check_boundary.py   Boundary validation tool
+├── view_image.py       Raw image viewer
+├── view_pipeline.py    Visualizes intermediate stages of the pipeline
+│
+├── collage_triangle.png  Sample test image
+├── vec_report_saved.txt  Auto-vectorization report
+│
+├── app                 Generated application binary
+├── blur                Generated blur output
+│
+└── build/              Build artifacts
 ```
 
 ---
@@ -432,17 +487,14 @@ Correctness was verified for:
 
 # Performance Results
 
-| Configuration | Execution Time (ms) | Speedup |
-| ------------- | ------------------- | ------- |
-| Scalar -O0    | TBD                 | 1.0×    |
-| Scalar -O2    | TBD                 | TBD     |
-| Scalar -O3    | TBD                 | TBD     |
-| Scalar -Ofast | TBD                 | TBD     |
-| RVV VLEN=128  | TBD                 | TBD     |
-| RVV VLEN=256  | TBD                 | TBD     |
-| RVV VLEN=512  | TBD                 | TBD     |
-
-Replace the table values with your measured results after profiling.
+|       Stage        | -O0 | -O2 | -O3 | Auto-vec | RVV 128 |RVV 256 |
+|--------------------|------:|------:|------:|------:|------:|------:|
+| Gaussian 5×5       | 55.331 ms | 21.539 ms | 6.406 ms | 6.506 ms | 65.600 ms | 57.316 ms |
+| Sobel Gx/Gy        | 10.718 ms | 1.226 ms | 1.105 ms | 1.202 ms | 1.105 ms (scalar only) | 1.236 ms (scalar only) |
+| Magnitude L1       | 3.468 ms | 2.039 ms | 2.088 ms | 2.046 ms | 11.843 ms | 10.938 ms |
+| Magnitude L2       | 55.498 ms | 14.772 ms | 14.578 ms | 14.277 ms | 25.727 ms | 22.936 ms |
+| Direction          | 5.187 ms | 1.059 ms | 1.026 ms | 1.005 ms | Scalar | Scalar |
+| Binary size (text) | 699 KB | 656 KB | 668 KB | 668 KB | 668 KB | 668 KB |
 
 ---
 
