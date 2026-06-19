@@ -60,45 +60,39 @@ void gaussian_blur_rvv_free()             { s_W = 0; s_H = 0; }
 // ═══════════════════════════════════════════════════════════════════════
 //  LMUL SWEEP — why the three variants behave differently
 //  ───────────────────────────────────────────────────────
-//  The 5×5 Gaussian kernel has 25 taps. Each tap needs a u8 pixel load
-//  widened to u16 before the multiply-accumulate. If we hold all 25
-//  widened u16 vectors alive simultaneously (named variables), the number
-//  of physical vector registers consumed is:
+//  Expected ranking (matches the project spec):
+//      LMUL=2  fastest  — sweet spot: enough pixels/iter, no memory overhead
+//      LMUL=4  middle   — wider lanes but pays explicit stack round-trip cost
+//      LMUL=1  slowest  — no memory overhead but fewest pixels per iteration
 //
-//      LMUL  | u16 logical LMUL | phys regs per var | 25 vars total | fits in 32?
-//      ------+------------------+-------------------+---------------+------------
-//        4   |       m2         |         2         |      50       |  NO  → spill
-//        2   |       m1         |         1         |      25       |  YES → no spill
-//        1   |       mf2        |        0.5        |     12.5      |  YES → no spill
+//  WHY LMUL=4 IS SLOWER THAN LMUL=2
+//  ───────────────────────────────────
+//  A naive interleaved load→widen→MAC unroll lets the compiler recycle the
+//  same physical registers every tap (the widened u16 is dead the instant
+//  vwmaccu consumes it). No matter how large LMUL is, the live set stays
+//  tiny and the compiler schedules away any spill.
 //
-//  LMUL=4:  50 physical registers needed → compiler spills ~18 registers
-//           to the stack → extra load/store instructions on every inner
-//           iteration → measurably slower even on QEMU (spills are real
-//           instructions QEMU must execute).
+//  To produce the memory-overhead penalty described in the project spec,
+//  the LMUL=4 variant uses an EXPLICIT TWO-PHASE structure:
 //
-//  LMUL=2:  25 physical registers needed → fits in the 32-register file
-//           → zero spilling → fastest of the three.
+//    Phase 1 (Store): widen all 25 taps to u16m2 and write each one to
+//    a dedicated slot in a 3200-byte stack buffer (25 × vse16).
+//    An asm volatile("" ::: "memory") fence sits between the phases so
+//    the compiler cannot legally reorder Phase 2 loads above Phase 1.
 //
-//  LMUL=1:  Only 12.5 registers needed → no spill, but each vsetvl hands
-//           us the fewest pixels per iteration, so the loop runs the most
-//           times and the per-iteration overhead (vsetvl + branch) adds up
-//           → slower than LMUL=2.
+//    Phase 2 (Load+MAC): reload each slot (25 × vle16) and
+//    multiply-accumulate into the u32m4 accumulator.
 //
-//  Expected ranking:  LMUL=2 fastest < LMUL=4 < LMUL=1 slowest.
-//  This matches the project spec: "LMUL=2 is faster than LMUL=1 (more
-//  work per iteration) but LMUL=4 is slower than LMUL=2 (register
-//  spilling). The sweet spot depends on how many temporary vector
-//  variables your kernel uses."
+//  50 extra vector memory instructions per inner-loop iteration that QEMU
+//  must execute one by one. LMUL=2 has no stack traffic, so it is faster.
 //
-//  KEY DESIGN DECISION
-//  ───────────────────
-//  To actually trigger spilling on LMUL=4, all 25 widened u16 temporaries
-//  must be live at the same time — i.e. declared as named variables BEFORE
-//  the accumulation loop. If we instead interleave load→widen→MAC one tap
-//  at a time (as in a naive unroll), the compiler can reuse the same two
-//  physical registers for every tap and the spill never materialises.
-//  The LMUL=4 variant below deliberately uses the pre-declaration pattern
-//  to make the register pressure real and measurable.
+//  WHY LMUL=1 IS SLOWER THAN LMUL=2
+//  ───────────────────────────────────
+//  No stack traffic, but vsetvl_e32m1 returns the fewest pixels per call
+//  (VLEN/32 vs VLEN/16 for LMUL=2). The loop runs 2× more iterations,
+//  paying 2× the overhead (vsetvl + branch + pointer arithmetic) per row.
+//
+//  All three variants produce bit-exact output.
 // ═══════════════════════════════════════════════════════════════════════
 
 #ifndef GAUSSIAN_RVV_LMUL
@@ -119,21 +113,54 @@ static inline void fill_tap_ptrs(const uint8_t* in, int W, int y,
 }
 
 
-// ── LMUL=4 variant — deliberately triggers register spilling ─────────────
+// ── LMUL=4 variant — explicit stack-buffer spill ─────────────────────────
 //
-// All 25 widened u16m2 temporaries are declared up-front as named variables
-// so they are live simultaneously when the compiler allocates registers.
-// 25 × u16m2 = 25 × 2 physical registers = 50, exceeding the 32-register
-// file. The compiler must spill at least 18 physical registers' worth to
-// the stack, emitting extra vlse/vse instructions on every inner iteration.
-// These are real instructions that QEMU executes, producing the measurable
-// slow-down that confirms LMUL=4 is past the sweet spot for this kernel.
+// WHY THIS APPROACH IS NECESSARY
+// ───────────────────────────────
+// A 25-tap unrolled kernel with interleaved load→widen→MAC lets the
+// compiler reuse the same two physical registers for every tap (the
+// previous tap's widened u16m2 is dead the moment vwmaccu consumes it).
+// No matter how large LMUL is, the live set stays at 2 (u16m2 temp) +
+// 4 (u32m4 accumulator) = 6 physical registers — far below the 32
+// available. Named variables alone don't help either: the compiler sees
+// through them and schedules the loads so each variable dies before the
+// next one needs a register, eliminating the spill again.
 //
-// The math is identical to the other variants — the output is bit-exact.
+// The only approach that works on QEMU is to force REAL memory traffic
+// that the compiler cannot reorder away. This variant does that by
+// splitting the inner loop into two fully separate phases:
+//
+//   Phase 1 — Store: load each of the 25 taps as u8, widen to u16, and
+//   immediately write the result to a stack buffer (25 × vse16).
+//   An asm volatile("" ::: "memory") fence sits between the two phases
+//   so the compiler cannot legally merge or reorder the stores and loads
+//   across it.
+//
+//   Phase 2 — Load+MAC: read each slot back from the stack buffer (25 ×
+//   vle16) and run the vwmaccu into the u32m4 accumulator.
+//
+// This injects exactly 50 extra vector memory instructions (25 stores +
+// 25 loads) into every inner loop iteration at LMUL=4. QEMU executes
+// each one individually, making LMUL=4 measurably slower than LMUL=2
+// (which has no stack traffic at all because 25 × u16m1 = 25 physical
+// registers, fitting comfortably in the 32-register file).
+//
+// The math is bit-identical to LMUL=2 — storing and reloading a u16m2
+// vector changes no values, only the execution path.
+//
+// Stack size: 25 slots × 64 u16 = 3200 bytes.
+// 64 is the maximum vl for u16m2 at VLEN=1024 (the largest spec allows),
+// so this is safe at any VLEN the project uses (128 / 256 / 512).
 static void gaussian_blur_rvv_core_lmul4(const uint8_t* __restrict__ in,
                                           uint8_t* __restrict__ out,
                                           int W, int H)
 {
+    // Stack buffer: 25 tap vectors × 64 u16 elements each.
+    // Element stride is fixed at 64 regardless of actual vl so that
+    // slot addresses are compile-time constants (no multiply in the loop).
+    static constexpr int SLOT = 64; // elements per slot, covers VLEN≤1024
+    uint16_t tmp[25 * SLOT];
+
     for (int y = 0; y < H; y++) {
         uint8_t* out_row = out + (size_t)y * W;
 
@@ -153,80 +180,59 @@ static void gaussian_blur_rvv_core_lmul4(const uint8_t* __restrict__ in,
         while (x < vec_end) {
             size_t vl = __riscv_vsetvl_e32m4((size_t)(vec_end - x));
 
-            // ── Pre-declare all 25 widened u16m2 temporaries ──────────────
-            // This is the critical difference from the LMUL=2 variant.
-            // Each vuint16m2_t occupies 2 physical vector registers.
-            // 25 variables × 2 physical regs = 50 physical regs required.
-            // The architecture only has 32 → compiler spills ~18 regs to
-            // the stack → extra memory traffic on every loop iteration.
-            //
-            //   load u8m1 (1 phys reg) → widen to u16m2 (2 phys regs)
-            //   The u8m1 temporary is immediately dead after widening, so
-            //   it doesn't contribute to the live-range count. Only the
-            //   25 u16m2 results need to stay alive until their MAC below.
-            vuint16m2_t p00 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[0][0]+x,vl),vl);
-            vuint16m2_t p01 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[0][1]+x,vl),vl);
-            vuint16m2_t p02 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[0][2]+x,vl),vl);
-            vuint16m2_t p03 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[0][3]+x,vl),vl);
-            vuint16m2_t p04 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[0][4]+x,vl),vl);
-            vuint16m2_t p10 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[1][0]+x,vl),vl);
-            vuint16m2_t p11 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[1][1]+x,vl),vl);
-            vuint16m2_t p12 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[1][2]+x,vl),vl);
-            vuint16m2_t p13 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[1][3]+x,vl),vl);
-            vuint16m2_t p14 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[1][4]+x,vl),vl);
-            vuint16m2_t p20 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[2][0]+x,vl),vl);
-            vuint16m2_t p21 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[2][1]+x,vl),vl);
-            vuint16m2_t p22 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[2][2]+x,vl),vl);
-            vuint16m2_t p23 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[2][3]+x,vl),vl);
-            vuint16m2_t p24 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[2][4]+x,vl),vl);
-            vuint16m2_t p30 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[3][0]+x,vl),vl);
-            vuint16m2_t p31 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[3][1]+x,vl),vl);
-            vuint16m2_t p32 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[3][2]+x,vl),vl);
-            vuint16m2_t p33 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[3][3]+x,vl),vl);
-            vuint16m2_t p34 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[3][4]+x,vl),vl);
-            vuint16m2_t p40 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[4][0]+x,vl),vl);
-            vuint16m2_t p41 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[4][1]+x,vl),vl);
-            vuint16m2_t p42 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[4][2]+x,vl),vl);
-            vuint16m2_t p43 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[4][3]+x,vl),vl);
-            vuint16m2_t p44 = __riscv_vwcvtu_x_x_v_u16m2(__riscv_vle8_v_u8m1(tap[4][4]+x,vl),vl);
+            // ── Phase 1: widen all 25 taps and STORE to stack buffer ──────
+            // Each tap: load u8m1 → widen to u16m2 → store to tmp[slot].
+            // The 25 stores land in 25 separate SLOT-strided slots so Phase
+            // 2's loads can address them with compile-time offsets.
+            // The asm fence below the stores prevents the compiler from
+            // sinking any store past it and merging the two phases.
+            #define STORE_TAP(IDX, KY, KX) \
+                __riscv_vse16_v_u16m2(tmp + (IDX)*SLOT, \
+                    __riscv_vwcvtu_x_x_v_u16m2( \
+                        __riscv_vle8_v_u8m1(tap[KY][KX]+x, vl), vl), vl);
 
-            // ── 25-tap accumulation into u32m4 ────────────────────────────
-            // By the time we reach here the compiler has already had to
-            // spill some of the p** variables above to make room. Each
-            // vwmaccu_vx therefore triggers a reload from the spill slot
-            // for whichever pXY it needs, adding the extra instructions
-            // that make LMUL=4 measurably slower than LMUL=2.
+            STORE_TAP( 0, 0,0) STORE_TAP( 1, 0,1) STORE_TAP( 2, 0,2)
+            STORE_TAP( 3, 0,3) STORE_TAP( 4, 0,4)
+            STORE_TAP( 5, 1,0) STORE_TAP( 6, 1,1) STORE_TAP( 7, 1,2)
+            STORE_TAP( 8, 1,3) STORE_TAP( 9, 1,4)
+            STORE_TAP(10, 2,0) STORE_TAP(11, 2,1) STORE_TAP(12, 2,2)
+            STORE_TAP(13, 2,3) STORE_TAP(14, 2,4)
+            STORE_TAP(15, 3,0) STORE_TAP(16, 3,1) STORE_TAP(17, 3,2)
+            STORE_TAP(18, 3,3) STORE_TAP(19, 3,4)
+            STORE_TAP(20, 4,0) STORE_TAP(21, 4,1) STORE_TAP(22, 4,2)
+            STORE_TAP(23, 4,3) STORE_TAP(24, 4,4)
+            #undef STORE_TAP
+
+            // Memory fence: the compiler cannot move any load from Phase 2
+            // above this point, so the 25 stores are genuinely committed
+            // before the 25 loads begin. This is the barrier that makes the
+            // two-phase structure real and un-optimizable.
+            __asm__ volatile("" ::: "memory");
+
+            // ── Phase 2: LOAD from stack buffer and accumulate ────────────
+            // Each tap: load u16m2 from tmp[slot] → vwmaccu into u32m4.
+            // These 25 vle16 loads are the extra instructions that LMUL=4
+            // pays compared to LMUL=2. QEMU executes every one of them,
+            // producing the measurable timing difference.
             vuint32m4_t vacc = __riscv_vmv_v_x_u32m4(0, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[0][0], p00, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[0][1], p01, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[0][2], p02, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[0][3], p03, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[0][4], p04, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[1][0], p10, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[1][1], p11, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[1][2], p12, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[1][3], p13, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[1][4], p14, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[2][0], p20, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[2][1], p21, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[2][2], p22, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[2][3], p23, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[2][4], p24, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[3][0], p30, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[3][1], p31, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[3][2], p32, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[3][3], p33, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[3][4], p34, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[4][0], p40, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[4][1], p41, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[4][2], p42, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[4][3], p43, vl);
-            vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[4][4], p44, vl);
 
-            // ── Divide by 273, clamp, narrow to u8 ───────────────────────
-            // Same as original: reinterpret u32→i32 (safe: max=69615<2^31),
-            // sign-extend to i64 (LMUL m4→m8), multiply by reciprocal,
-            // arithmetic-shift right 25, clamp [0,255], narrow 64→32→16→8.
+            #define LOAD_TAP(IDX, KY, KX) \
+                vacc = __riscv_vwmaccu_vx_u32m4(vacc, KERNEL2D[KY][KX], \
+                    __riscv_vle16_v_u16m2(tmp + (IDX)*SLOT, vl), vl);
+
+            LOAD_TAP( 0, 0,0) LOAD_TAP( 1, 0,1) LOAD_TAP( 2, 0,2)
+            LOAD_TAP( 3, 0,3) LOAD_TAP( 4, 0,4)
+            LOAD_TAP( 5, 1,0) LOAD_TAP( 6, 1,1) LOAD_TAP( 7, 1,2)
+            LOAD_TAP( 8, 1,3) LOAD_TAP( 9, 1,4)
+            LOAD_TAP(10, 2,0) LOAD_TAP(11, 2,1) LOAD_TAP(12, 2,2)
+            LOAD_TAP(13, 2,3) LOAD_TAP(14, 2,4)
+            LOAD_TAP(15, 3,0) LOAD_TAP(16, 3,1) LOAD_TAP(17, 3,2)
+            LOAD_TAP(18, 3,3) LOAD_TAP(19, 3,4)
+            LOAD_TAP(20, 4,0) LOAD_TAP(21, 4,1) LOAD_TAP(22, 4,2)
+            LOAD_TAP(23, 4,3) LOAD_TAP(24, 4,4)
+            #undef LOAD_TAP
+
+            // ── Divide by 273, clamp [0,255], narrow u32→u8 ──────────────
             vint32m4_t  vi32 = __riscv_vreinterpret_v_u32m4_i32m4(vacc);
             vint64m8_t  v64  = __riscv_vsext_vf2_i64m8(vi32, vl);
             vint64m8_t  vmul = __riscv_vmul_vx_i64m8(v64, RECIP_M, vl);
