@@ -96,7 +96,7 @@ void gaussian_blur_rvv_free()             { s_W = 0; s_H = 0; }
 // ═══════════════════════════════════════════════════════════════════════
 
 #ifndef GAUSSIAN_RVV_LMUL
-#define GAUSSIAN_RVV_LMUL 4
+#define GAUSSIAN_RVV_LMUL 2
 #endif
 
 

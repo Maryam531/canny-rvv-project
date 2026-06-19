@@ -32,6 +32,9 @@
 #include "sobel.h"
 #include "magnitude.h"
 #include "direction.h"
+#include "nms.h"
+#include "threshold.h"
+#include "hysteresis.h"
 #include "timer.h"
 
 #define ITERATIONS 100
@@ -333,6 +336,61 @@ printf("\n");
         printf("  Overhead:         %8.2fx slower (expected on QEMU)\n",
                rvv_l2_ms / scalar_l2_ms);
     printf("\n");
+
+    // ═══════════════════════════════════════════════════════════════════════
+    printf("==========================================================\n");
+    printf("  STAGE 6: HYSTERESIS\n");
+    printf("==========================================================\n");
+
+    // Thresholds expressed as a fraction of the 0-255 magnitude range.
+    const uint8_t low_thresh  = 51;   // 20% of 255
+    const uint8_t high_thresh = 102;  // 40% of 255
+
+    uint8_t* nms_out      = (uint8_t*)aligned_alloc(64, (size_t)N);
+    uint8_t* classified   = (uint8_t*)aligned_alloc(64, (size_t)N);
+    uint8_t* final_edges  = (uint8_t*)aligned_alloc(64, (size_t)N);
+
+    // Warm-up
+    nonMaximumSuppression(scalar_mag_l2, directions, nms_out, W, H);
+    doubleThreshold(nms_out, classified, W, H, low_thresh, high_thresh);
+    hysteresisEdgeTracing(classified, final_edges, W, H);
+
+    // Benchmark: NMS
+    t0 = get_time_ms();
+    for (int i = 0; i < ITERATIONS; i++)
+        nonMaximumSuppression(scalar_mag_l2, directions, nms_out, W, H);
+    double nms_ms = (get_time_ms() - t0) / ITERATIONS;
+
+    // Benchmark: Double Threshold
+    t0 = get_time_ms();
+    for (int i = 0; i < ITERATIONS; i++)
+        doubleThreshold(nms_out, classified, W, H, low_thresh, high_thresh);
+    double threshold_ms = (get_time_ms() - t0) / ITERATIONS;
+
+    // Benchmark: Hysteresis
+    t0 = get_time_ms();
+    for (int i = 0; i < ITERATIONS; i++)
+        hysteresisEdgeTracing(classified, final_edges, W, H);
+    double hysteresis_ms = (get_time_ms() - t0) / ITERATIONS;
+
+    // Count final edge pixels for a quick sanity signal
+    int strong_count = 0, weak_promoted = 0;
+    for (int i = 0; i < N; i++) {
+        if (classified[i] == EDGE_STRONG) strong_count++;
+        else if (classified[i] == EDGE_WEAK && final_edges[i] == EDGE_STRONG) weak_promoted++;
+    }
+
+    printf("  Thresholds:          low=%d  high=%d\n", low_thresh, high_thresh);
+    printf("  Strong edge pixels:  %d\n", strong_count);
+    printf("  Weak pixels kept:    %d (connected to strong)\n", weak_promoted);
+    printf("\n");
+    printf("  NMS:                 %8.3f ms/run\n", nms_ms);
+    printf("  Double Threshold:    %8.3f ms/run\n", threshold_ms);
+    printf("  Hysteresis:          %8.3f ms/run\n", hysteresis_ms);
+    printf("\n");
+
+    save_image("images/nms.raw",         { W, H, nms_out });
+    save_image("images/edges_final.raw", { W, H, final_edges });
 
     // ═══════════════════════════════════════════════════════════════════════
     printf("==========================================================\n");

@@ -131,25 +131,6 @@ int main() {
 
     Image uniform = create_uniform_image(256, 256, 128);
     save_image("images/uniform.raw", uniform);
-<<<<<<< HEAD
- Image circle = create_circle_image(256, 256);
-save_image("images/circle.raw", circle);
-free_image(circle);
-
-Image triangle = create_triangle_image(256, 256);
-save_image("images/triangle.raw", triangle);
-free_image(triangle);   free_image(uniform);
-=======
-    free_image(uniform);  
-
-    Image circle = create_circle_image(256, 256);
-    save_image("images/circle.raw", circle);
-    free_image(circle);
-
-    Image triangle = create_triangle_image(256, 256);
-    save_image("images/triangle.raw", triangle);
-    free_image(triangle);   free_image(uniform);
->>>>>>> fc6f637d99c7a58461f805d2ce8b1709d1d152ae
 
     printf("Test images generated in images/ folder\n");
     return 0;
