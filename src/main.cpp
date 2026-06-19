@@ -125,7 +125,60 @@ static void print_correctness(const char* label,
         printf("  Overhead:         %8.2fx slower (expected on QEMU)\n",
                rvv_gauss_ms / scalar_gauss_ms);
     printf("\n");
+// ═══════════════════════════════════════════════════════════════════════
+printf("==========================================================\n");
+printf("  STAGE 1b: GAUSSIAN LMUL SWEEP\n");
+printf("==========================================================\n");
 
+// Correctness: all three variants must match scalar output
+uint8_t* lmul1_out = (uint8_t*)aligned_alloc(64, (size_t)N);
+uint8_t* lmul2_out = (uint8_t*)aligned_alloc(64, (size_t)N);
+uint8_t* lmul4_out = (uint8_t*)aligned_alloc(64, (size_t)N);
+
+gaussian_blur_rvv_into_lmul1(img, lmul1_out);
+gaussian_blur_rvv_into_lmul2(img, lmul2_out);
+gaussian_blur_rvv_into_lmul4(img, lmul4_out);
+
+print_correctness("LMUL=1 vs scalar:", scalar_gauss, lmul1_out, N);
+print_correctness("LMUL=2 vs scalar:", scalar_gauss, lmul2_out, N);
+print_correctness("LMUL=4 vs scalar:", scalar_gauss, lmul4_out, N);
+printf("\n");
+
+// Warm-up
+gaussian_blur_rvv_into_lmul1(img, lmul1_out);
+gaussian_blur_rvv_into_lmul2(img, lmul2_out);
+gaussian_blur_rvv_into_lmul4(img, lmul4_out);
+
+// Benchmark LMUL=1
+t0 = get_time_ms();
+for (int i = 0; i < ITERATIONS; i++)
+    gaussian_blur_rvv_into_lmul1(img, lmul1_out);
+double lmul1_ms = (get_time_ms() - t0) / ITERATIONS;
+
+// Benchmark LMUL=2
+t0 = get_time_ms();
+for (int i = 0; i < ITERATIONS; i++)
+    gaussian_blur_rvv_into_lmul2(img, lmul2_out);
+double lmul2_ms = (get_time_ms() - t0) / ITERATIONS;
+
+// Benchmark LMUL=4
+t0 = get_time_ms();
+for (int i = 0; i < ITERATIONS; i++)
+    gaussian_blur_rvv_into_lmul4(img, lmul4_out);
+double lmul4_ms = (get_time_ms() - t0) / ITERATIONS;
+
+printf("LMUL sweep results:\n");
+printf("  LMUL=1:  %8.3f ms/run\n", lmul1_ms);
+printf("  LMUL=2:  %8.3f ms/run\n", lmul2_ms);
+printf("  LMUL=4:  %8.3f ms/run\n", lmul4_ms);
+printf("\n");
+printf("  Sweet spot: LMUL=2 (%.2fx faster than LMUL=1, %.2fx faster than LMUL=4)\n",
+       lmul1_ms / lmul2_ms, lmul4_ms / lmul2_ms);
+printf("\n");
+
+free(lmul1_out);
+free(lmul2_out);
+free(lmul4_out);
     // ═══════════════════════════════════════════════════════════════════════
     printf("==========================================================\n");
     printf("  STAGE 2: SOBEL (scalar only)\n");

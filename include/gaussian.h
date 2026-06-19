@@ -41,5 +41,7 @@ void gaussian_blur_rvv_into(const Image& img, uint8_t* out_data);
 
 // Call ONCE after the benchmark loop to release the ring buffer.
 void gaussian_blur_rvv_free();
-
+void gaussian_blur_rvv_into_lmul1(const Image& img, uint8_t* out_data);
+void gaussian_blur_rvv_into_lmul2(const Image& img, uint8_t* out_data);
+void gaussian_blur_rvv_into_lmul4(const Image& img, uint8_t* out_data);
 #endif // GAUSSIAN_H
