@@ -33,8 +33,6 @@ static constexpr uint8_t EDGE_NONE   =   0;
 // Output is used directly as input to hysteresis edge tracing.
 
 void doubleThreshold(
-<<<<<<< HEAD
-
     const uint8_t* input,
 
     uint8_t*       output,
