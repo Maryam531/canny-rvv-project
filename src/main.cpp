@@ -302,13 +302,13 @@ printf("\n");
     uint8_t* classified = (uint8_t*)aligned_alloc(64, (size_t)N);
     uint8_t* final_edges = (uint8_t*)aligned_alloc(64, (size_t)N);
     // Warm-up
-    nonMaximumSuppression(scalar_mag_l2, reinterpret_cast<const uint8_t*>(directions), nms_out, W, H);
+    nonMaximumSuppression(scalar_mag_l2,directions, nms_out, W, H);
     doubleThreshold(nms_out, classified, W, H, low_thresh, high_thresh);
     hysteresisEdgeTracing(classified, final_edges, W, H);
     // Benchmark: NMS
     t0 = get_time_ms();
     for (int i = 0; i < ITERATIONS; i++)
-        nonMaximumSuppression(scalar_mag_l2, reinterpret_cast<const uint8_t*>(directions), nms_out, W, H);
+        nonMaximumSuppression(scalar_mag_l2,direction, nms_out, W, H);
     double nms_ms = (get_time_ms() - t0) / ITERATIONS;
     // Benchmark: Double Threshold
     t0 = get_time_ms();
