@@ -17,6 +17,9 @@ riscv64-linux-gnu-g++ \
     src/rvv_magnitude.cpp \
     src/image_io.cpp \
     src/syscall.cpp \
+    src/nms.cpp \
+    src/threshold.cpp \
+    src/hysteresis.cpp \
     -Iinclude \
     -std=c++17 \
     ${OPT_LEVEL:--O3} \
