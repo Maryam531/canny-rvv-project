@@ -379,7 +379,7 @@ int16_t* gx2 = (int16_t*)aligned_alloc(64, (size_t)N * sizeof(int16_t));
 int16_t* gy2 = (int16_t*)aligned_alloc(64, (size_t)N * sizeof(int16_t));
 memset(gx2, 0, (size_t)N * sizeof(int16_t));
 memset(gy2, 0, (size_t)N * sizeof(int16_t));
-        sobel(rvv_gauss_img, gx2, gy2);        
+        sobel(rvv_gauss_img, gx2, gy2);
         // DEBUG: print a few gx2/gy2 values to confirm Sobel ran on correct image
         printf("DEBUG gx2[100]=%d gy2[100]=%d\n", (int)gx2[100], (int)gy2[100]);
         printf("DEBUG gx2[1000]=%d gy2[1000]=%d\n", (int)gx2[1000], (int)gy2[1000]);
